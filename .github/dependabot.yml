@@ -216,6 +216,21 @@ updates:
           - com.google.firebase:firebase-crashlytics-ktx
           - com.google.firebase:firebase-crashlytics-ndk
           - com.google.firebase:firebase-analytics-ktx
+  - package-ecosystem: npm
+    directory: kotlin/android/
+    schedule:
+      interval: weekly
+    cooldown:
+      semver-patch-days: 2
+      semver-minor-days: 7
+      semver-major-days: 14
+      default-days: 7
+    open-pull-requests-limit: 100
+    groups:
+      security-all:
+        applies-to: security-updates
+        patterns:
+          - "*"
 
   - package-ecosystem: swift
     directory: swift/apple/FirezoneKit

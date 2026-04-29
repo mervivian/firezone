@@ -1,0 +1,8 @@
+{
+  "name": "firezone-android",
+  "private": true,
+  "version": "0.1.0",
+  "devDependencies": {
+    "firebase-tools": "^15.0.0"
+  }
+}
