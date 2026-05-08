@@ -1,0 +1,431 @@
+---
+title: "Linking Identities Across Providers"
+subtitle: "Modeling identity across providers in zero trust applications"
+description: "Modeling identity across providers in zero trust applications"
+postTitle: "The Multi-Provider Identity Crisis"
+authorName: "Jamil Bou Kheir"
+authorTitle: Founder
+authorEmail: jamil@firezone.dev
+date: 2026-05-11
+---
+
+import Alert from "@/components/DocsAlert";
+
+Alice signs in with Google. Then she signs in with Okta. Same email both times, two different identities under the hood. Which one got production access?
+
+By every reasonable measure, OpenID Connect has been a wildly successful standard — it powers authentication for a huge chunk of the internet. And yet, it does not solve this exact scenario. OIDC can tell your application that Alice authenticated with Google, and it can tell your application that Alice authenticated with Okta. What it cannot tell you is whether those two identities belong to the same user.
+
+That part is left to you. And if your application controls access to production systems, customer data, internal tools, or anything else people might reasonably care about, _"left to you"_ is where the fun begins.
+
+## The standards (and what they leave on the floor)
+
+We are not the first people to wrestle with identity on the internet, and we will not be the last. For our purposes, two standards matter:
+
+- **OAuth 2.0** is an authorization framework. It lets an application access resources on behalf of a user without asking that user to hand over long-term credentials. ([IETF Datatracker][1])
+- **OpenID Connect** is an identity layer on top of OAuth. It adds ID tokens and standard claims so an application can learn who authenticated. ([OpenID Foundation][2])
+
+That is the happy path. Now for the part that usually surprises people.
+
+### Pop quiz
+
+When a user authenticates with OIDC, the OpenID Provider returns an ID token containing claims about the authenticated identity. Which of these claims are required?
+
+| Claim                | Meaning                         |
+| -------------------- | ------------------------------- |
+| `sub`                | Subject identifier              |
+| `email`              | Email address                   |
+| `email_verified`     | Whether provider verified email |
+| `preferred_username` | Username                        |
+| `aud`                | Intended audience/client        |
+| `auth_time`          | Time user authenticated         |
+| `given_name`         | First name                      |
+| `iss`                | Issuer identifier               |
+| `exp`                | Expiration timestamp            |
+| `iat`                | Issued-at timestamp             |
+| `profile`            | Profile URL                     |
+
+Did your guess include `email` or `preferred_username`? Sorry — neither is required. The required ID token claims from that list are just:
+
+```text
+iss
+sub
+aud
+exp
+iat
+```
+
+There are caveats in some flows (`auth_time` can become required in certain cases), but for the identity problem we care about, the important pair is `iss, sub`. Together, they identify a user account inside a provider, and the OIDC spec defines both as required claims. ([OpenID Foundation][2])
+
+For example, `https://accounts.google.com, 1234567890` tells you which Google identity just authenticated. It does _not_ tell you whether that Google identity belongs to the same user as `https://company.okta.com, 00uabc123`. That part is left to your application.
+
+This is the quiet little trap in multi-provider identity. The standards give you enough structure to authenticate someone, but not enough structure to know whether two authenticated identities should collapse into the same user. You get a pile of facts. You still have to decide what they mean.
+
+## What's an identity, anyway?
+
+It's easier to start with what identities are _not_: identities are not people. For the rest of this article, we'll use the following terms:
+
+| Term     | Meaning                                |
+| -------- | -------------------------------------- |
+| Person   | The actual human being                 |
+| User     | The user record in your application    |
+| Identity | A user account in an external provider |
+
+So Alice is the person. Alice in your application is the user. Alice in Google is an identity, and Alice in Okta is _another_ identity. This sounds pedantic until you have to debug why Alice lost access to production after her company migrated identity providers — then it becomes very real, very quickly.
+
+A single user in your application may have multiple identities across providers. If you do not model that explicitly, you are still modeling it; you're just doing it accidentally, in whatever corner of the codebase first encountered the problem at 4:37 PM on a Friday. That corner of the codebase is now your identity architecture. Congratulations.
+
+## The first time this bites you
+
+You build a web application and allow OIDC authentication via Google. Users are happy, life is good. Alice signs in with Google, and as recommended, you identify her by the `iss, sub` pair in the ID token:
+
+```text
+User
+  └── (Google, sub=123)
+```
+
+Then Alice's company migrates to Okta. She tries to sign in again, but this time through Okta:
+
+```text
+(Okta, sub=456)
+```
+
+Your application has never seen this identity before. So now what? Do you create a second user? Link it to the existing one? Reject the login? OIDC gives you no answer here.
+
+And this is not just a neat little modeling puzzle — it creates real operational problems. Access rules usually need to follow the person, not the identity. Audit logs should reflect the human behind an action. Billing systems usually charge per user — or _seat_, which is what we call humans in enterprise speak — not per identity. Companies migrate identity providers all the time, and they get acquired, merge directories, change domains, and otherwise make a glorious mess of your nice clean model.
+
+OIDC solves a lot of problems related to authentication on the modern internet. This is not one of them.
+
+## So naturally, we reach for email
+
+If `(iss, sub)` identifies a user account inside one provider, what can we use to connect identities across providers? Most applications reach for email, and email has a lot going for it: it is usually present, humans recognize it, admins understand it, and it is often unique inside an organization at a point in time.
+
+That last phrase is doing a lot of work.
+
+Email is unique _right now_. You can usually assume two people do not both control `alice@company.com` at the same time — but you cannot assume the Alice who owned `alice@company.com` last year is the same Alice who owns it today. This is where email becomes dangerous. Not because email is useless; quite the opposite. Email is useful enough that people stop noticing when they've quietly promoted it from "helpful identifier" to "load-bearing security primitive." That promotion is where bugs come from.
+
+Most of the problems fall into three buckets.
+
+### Same person, new email
+
+Name changes. Contractor-to-employee transitions. Domain changes. Acquisitions. Identity provider migrations:
+
+```text
+alice.walker@company.com   →   alice.doe@company.com
+alice.contractor@gmail.com →   alice@company.com
+alice@oldcompany.com       →   alice@newcompany.com
+```
+
+Same person, same access rules (probably), different email. If your system treats email as identity, every one of these cases becomes awkward.
+
+### Same email, new person
+
+Alice leaves. Months later, another Alice gets the same email address: `alice@company.com`. I genuinely hope no one is reusing emails like this. If you are, please don't. But it happens, and if old access rules or linked identities are still attached to that email, you have a real security problem. The old Alice left the company. The new Alice did not earn her production access through reincarnation.
+
+### Same email, different providers
+
+Now return to the original example. Alice signs in with Google and Okta, and both identities claim `alice@company.com`. Should those identities map to the same user?
+
+Usually, yes. Always? No. The standards do not answer this question — your application has to.
+
+Email is not proof. It is a linking signal. A very useful one, but still a signal. The mistake is not using email; the mistake is forgetting what kind of thing email is.
+
+## Email as a one-time link
+
+At Firezone, we use email as a link, not as the durable identity. The model looks like this:
+
+```text
+User
+  email
+
+ExternalIdentity
+  issuer
+  subject
+  user_id
+```
+
+A user has one email. A user can have many external identities. Each external identity has an issuer and provider-specific subject. When someone signs in, the flow is:
+
+1. Look for an existing identity by `(issuer, subject)`.
+2. If one exists, sign in as the linked user.
+3. If no identity exists, look for a user with the same email.
+4. If a matching user exists, attach the new identity to that user.
+5. If no matching user exists, reject the login.
+
+Email is used as a one-time link. After that, future logins use `(issuer, subject)` directly:
+
+```text
+Before:
+User
+  email: alice@company.com
+  identities:
+    - (Google, sub=123)
+
+After first Okta login:
+User
+  email: alice@company.com
+  identities:
+    - (Google, sub=123)
+    - (Okta, sub=456)
+```
+
+Here's the important distinction: **email is not the durable identity. Email is how we attach a new provider identity to an existing user.** Once the identity is attached, email can change without breaking future logins for that provider. The Okta identity is still `(Okta, sub=456)` even if Alice's email later changes from `alice.walker@company.com` to `alice.doe@company.com`.
+
+This does not make email perfect. It just limits where email is used — and that matters. A bad identity model turns every future edge case into a special case. A better model makes the edge cases boring. Boring is what you want here. Nobody wants thrilling identity plumbing.
+
+## How identities get created
+
+So far we've talked about what happens when someone signs in. But there's another question hiding underneath all of this: how did the user get into your application in the first place? There are two common approaches: just-in-time provisioning, and directory sync.
+
+### Just-in-time provisioning
+
+With just-in-time provisioning, the user signs in and the application creates whatever records it needs at that moment. This is simple, and simple is nice. It also creates problems.
+
+If any user who can authenticate can create an account in your application, then authentication _becomes_ provisioning. Depending on the provider and configuration, that can mean a lot more users than you expected — affecting access control, billing, and auditability. You thought you were adding login. You added account creation.
+
+This is how identity systems get you: they stand very still and look harmless until you realize your authentication flow is now also your provisioning system, your billing system, your access control boundary, and part of your audit log story.
+
+At Firezone, if directory sync is not enabled, users are pre-created by email. When someone authenticates, we check `(issuer, subject)`; if it's new, we look for an existing user by email and attach the identity to that user, otherwise we reject the login. This gives us the convenience of JIT identity linking without allowing arbitrary users to create accounts.
+
+### Directory sync
+
+The other approach is to sync users and groups ahead of time. This lets the application know about users before they log in, and it also lets the application use group membership for access rules.
+
+That sounds straightforward. It is not. Of course it is not.
+
+## SCIM, or: when an internet-wide problem meets an internet-wide standard
+
+When enterprise applications need to sync users and groups, the standard answer is SCIM: the System for Cross-domain Identity Management. And what do we do when the internet collectively has a problem? We create a standard.
+
+At a high level, SCIM means your application exposes endpoints like this:
+
+```http
+GET    /scim/v2/Users
+POST   /scim/v2/Users
+PATCH  /scim/v2/Users/:id
+
+GET    /scim/v2/Groups
+POST   /scim/v2/Groups
+PATCH  /scim/v2/Groups/:id
+```
+
+The SCIM protocol defines resources like `/Users`, `/Groups`, `/Schemas`, and `/ServiceProviderConfig`, REST operations over those resources, and pagination for list responses. So in principle a SCIM client can enumerate users and groups. ([scim.cloud][3])
+
+By the sound of it, our problem is solved. Unfortunately, SCIM is only the _shape_ of the API. The details still vary by provider, and that's where things get interesting.
+
+For example, Okta may check for an existing user before creating one:
+
+```http
+GET /scim/v2/Users?filter=userName%20eq%20%22alice%40company.com%22
+Authorization: Bearer ...
+```
+
+and then create the user:
+
+```http
+POST /scim/v2/Users
+Content-Type: application/scim+json
+
+{
+  "userName": "alice@company.com",
+  "name": {
+    "givenName": "Alice",
+    "familyName": "Walker"
+  },
+  "emails": [
+    {
+      "value": "alice@company.com",
+      "primary": true
+    }
+  ],
+  "active": true
+}
+```
+
+Okta documents deprovisioning as an update to `active=false`, not as a `DELETE` of the user resource. If that user needs to be reprovisioned later, Okta switches `active` back to `true`. ([Okta Developer][4]) So a user lifecycle event might look like:
+
+```http
+PATCH /scim/v2/Users/2819c223
+Content-Type: application/scim+json
+
+{
+  "Operations": [
+    {
+      "op": "Replace",
+      "path": "active",
+      "value": false
+    }
+  ]
+}
+```
+
+Now consider Microsoft Entra. The HTTP may still look familiar:
+
+```http
+POST /scim/v2/Users
+Content-Type: application/scim+json
+
+{
+  "userName": "alice@company.com",
+  "active": true
+}
+```
+
+But the workflow is different. Entra runs an initial provisioning cycle, stores a watermark, and then runs incremental cycles from that point forward. It also documents lifecycle differences for disabled, soft-deleted, and hard-deleted users: disabled or soft-deleted users are disabled in the target system via an update, while hard-deleted users are deleted in the target system. ([Microsoft Learn][5])
+
+Same standard. Different lifecycle model. This is where "supports SCIM" starts doing a lot less work than you'd like.
+
+Workday has SCIM too, though the public docs I found are for Workday Strategic Sourcing rather than Workday HCM generally. Its SCIM API uses SCIM paths, but authentication includes both a company API key and HTTP Basic auth:
+
+```http
+GET /scim/v2/ResourceTypes
+Accept: application/scim+json
+X-Api-Key: ${COMPANY_KEY}
+Authorization: Basic ${Base64(USER_EMAIL:USER_TOKEN)}
+```
+
+It also documents a per-company rate limit of 5 requests per second. That's not a schema issue, but it absolutely affects sync design. ([Workday Strategic Sourcing][6])
+
+> TODO: Add citation / first-party Workday HCM SCIM docs if we want to make a broader Workday claim.
+
+Rippling supports SCIM-style provisioning workflows, and third-party integration docs describe configuring Rippling with a SCIM endpoint and bearer token.
+
+> TODO: Add concrete Rippling SCIM HTTP examples from first-party Rippling docs or partner documentation. I could not find a first-party Rippling SCIM HTTP reference with example payloads.
+
+The point is not that any one provider is wrong. The point is that "supports SCIM" does not mean "behaves the same." The differences show up in exactly the places that matter for access control: how users are matched, how users are disabled, how groups are pushed, whether membership updates are full replacement or partial patches, whether nested groups are flattened, how often sync runs, and whether an admin can force a fresh sync.
+
+These are the details you end up building around. And if you don't build around them, they don't go away — they wait. Quietly. Patiently. Then someone goes on parental leave, or gets rehired, or changes departments, or gets removed from a group, and suddenly your clean little model is on fire.
+
+## Does SCIM support full sync?
+
+Sort of. SCIM gives clients a way to list users and groups, and it defines pagination so a client can page through large directories instead of fetching everything at once. ([scim.cloud][3]) So yes, a SCIM client can perform a full enumeration of `/Users` and `/Groups` if the server supports those list operations correctly.
+
+But SCIM does not guarantee that your provider will give your application a fresh full sync whenever your admin wants one. That part depends on the provider. Microsoft Entra, for example, has an initial cycle and incremental cycles. It also supports on-demand provisioning, but that flow is aimed at provisioning a selected user or group for testing and troubleshooting — not at pulling a complete fresh copy of the directory on demand. ([Microsoft Learn][5])
+
+So SCIM gives you a protocol. The provider decides the workflow. And the workflow matters.
+
+This distinction is easy to miss until you are staring at an admin portal wondering why the group membership changed in the IdP but not in your app. The user is in the group. The user is not in the group. The UI says one thing, the token says another, and the provisioning logs have opinions. None of them agree. Somewhere, a support ticket is being born.
+
+## Groups are where this gets real
+
+So far we've mostly talked about users and identities. But no one wants to manage access one user at a time — that way lies madness, spreadsheets, and eventually someone asking why the contractor still has access to production.
+
+In any serious enterprise application, access is managed through groups: Engineering, Security, Contractors, Production Access, Finance. Groups are how administrators keep access rules manageable. Instead of saying "Alice can access production, Bob can access production, Carol can access production…", you say "Members of Production Access can access production." That is the only sane way to run this at scale.
+
+But groups make identity reconciliation even more important. Suppose Alice has two identities, `(Google, sub=123)` and `(Okta, sub=456)`. If those identities are treated as separate users, which one gets the group membership?
+
+```text
+User A
+  identity: (Google, sub=123)
+  groups:
+    - Engineering
+
+User B
+  identity: (Okta, sub=456)
+  groups:
+    - Production Access
+```
+
+Is Alice in Engineering? Production Access? Both? Neither? This is not a philosophical question — this is your authorization layer trying to decide whether to let someone into production. The answer should belong to the user in your application, not to whichever identity happened to show up first.
+
+That is why the model needs to look more like this:
+
+```text
+User
+  email: alice@company.com
+
+  identities:
+    - (Google, sub=123)
+    - (Okta, sub=456)
+
+  groups:
+    - Engineering
+    - Production Access
+```
+
+Now access rules can be written against the user and the user's groups, regardless of which provider Alice used to authenticate.
+
+### Synced groups
+
+Directory sync lets you import groups from the identity provider, which is useful because the identity provider is often where the organization already manages membership: an Okta group called Engineering, an Entra group called Production Access, a Google group called Security. Your application can then use those synced groups for access rules.
+
+But synced groups are still provider-specific. If Alice moves from Google to Okta, the Google group and the Okta group may be different external groups with different provider IDs. So now the problem is not just _"do these two identities belong to the same user?"_ — it is also _"how do we keep access stable when the user's provider changes?"_
+
+### Custom groups
+
+This is where application-defined groups become useful. Sometimes the identity provider group is exactly what you want; sometimes it isn't. Maybe the customer has an Okta group called Engineering, a Google group called eng-team, and an Entra group called Product Engineering. All of those might mean roughly the same thing — or they might not.
+
+Rather than forcing administrators to encode every access rule directly against provider-specific groups, the application can allow custom groups:
+
+```text
+Firezone group: Engineers
+  includes:
+    - Okta Engineering
+    - Google eng-team
+    - Entra Product Engineering
+```
+
+Or even:
+
+```text
+Firezone group: Production Access
+  includes:
+    - synced provider groups
+    - manually added users
+```
+
+This gives the application a stable place to hang access rules. The provider groups can change. The user can gain a new identity. The company can migrate from Google to Okta. The access policy does not need to be rebuilt from scratch every time.
+
+That is the point of reconciling identity in the first place. Not because reconciliation is elegant — because the alternative is making every administrator rebuild the same policy every time the upstream identity system changes its mind.
+
+## Why we prefer pull-based directory sync
+
+SCIM is usually push-based: the identity provider decides when to send updates to your application, and your application receives creates, updates, deletes, group membership changes, and whatever else the provider decides to send. That can work. But it also means your application is often reacting to a stream of provider-specific events. If an event is delayed, missed, filtered, scoped incorrectly, or interpreted differently by the provider, your application may not have the state you think it has.
+
+Pull-based sync flips this around. Instead of waiting for the identity provider to push changes, the application asks the provider for the current directory state — give me users, give me groups, give me memberships — and then normalizes that data into its own model:
+
+```text
+User
+  └── External identities
+  └── Groups
+  └── Access rules
+```
+
+This has two nice properties. First, the administrator can trigger a resync when they need to. No waiting for the next provider-controlled provisioning cycle, no guessing whether a push event fired, no _"try again in 40 minutes and see if the group shows up."_ Second, the application can build access decisions from a fresh directory listing at sync time.
+
+It's not perfect — directory APIs can still have their own propagation delays, because computers remain regrettably real. But it gives the application a much clearer model: pull directory state, normalize users and groups, link identities, evaluate access.
+
+At Firezone, directory sync runs automatically and can also be triggered manually with "Sync Now" from the admin settings. Firezone's docs say users, groups, and organizational units sync automatically every two hours, and admins can trigger a manual sync at any time. ([Firezone][7])
+
+That is the behavior we want for access control. Auth gives us the identity assertion (_"this is `(Okta, sub=456)`"_). Directory sync gives us context (_"this user exists, this user belongs to these groups, this user should have these access rules"_). The application still has to connect the two.
+
+## Why this matters for Zero Trust
+
+In a Zero Trust application, access decisions depend on identity. Not vibes. Not IP addresses. Not "probably Alice."
+
+The application needs to know who is signing in, which user that identity maps to, which groups apply, which resources that user can access, and whether any of that state changed recently. If your identity model is wrong, the access decision is wrong.
+
+That is why this problem matters. It is not just an account-linking annoyance — it sits directly underneath authorization, audit logs, and policy enforcement. Zero Trust has a way of making sloppy identity assumptions visible. You can hide a lot of mess behind a perimeter, but once every access decision is evaluated directly, the mess gets promoted into the critical path.
+
+If Alice has two identities, and those identities disagree, your policy engine has to pick a reality. You want that reality to be intentional.
+
+## Final thoughts
+
+OIDC solves authentication well. SCIM tries to solve provisioning. Neither fully solves the problem of connecting identities across providers to users in your application.
+
+Every application that supports multiple providers eventually has to answer the same basic question:
+
+> When do these identities belong to the same user?
+
+Email is often the most practical answer, but it should be treated carefully. Use it to link. Do not confuse it for identity.
+
+And once groups enter the picture, the stakes get higher. You are no longer just deciding whether Alice can log in — you are deciding which policies, resources, audit logs, billing records, and access rules belong to Alice across every provider she uses. That is why Firezone treats identity as something to reconcile, not something to assume.
+
+You can read more about how Firezone handles directory sync in our docs: [Firezone Directory Sync](https://www.firezone.dev/kb/directory-sync).
+
+[1]: https://datatracker.ietf.org/doc/html/rfc6749?utm_source=chatgpt.com "RFC 6749 - The OAuth 2.0 Authorization Framework"
+[2]: https://openid.net/specs/openid-connect-core-1_0.html?utm_source=chatgpt.com "OpenID Connect Core 1.0 incorporating errata set 2"
+[3]: https://scim.cloud/?utm_source=chatgpt.com "SCIM: System for Cross-domain Identity Management"
+[4]: https://developer.okta.com/docs/concepts/scim/?utm_source=chatgpt.com "Understanding SCIM"
+[5]: https://learn.microsoft.com/en-us/entra/identity/app-provisioning/how-provisioning-works?utm_source=chatgpt.com "How Application Provisioning works in Microsoft Entra ID"
+[6]: https://apidocs.workdayspend.com/services/scim/v2.html?utm_source=chatgpt.com "Workday Strategic Sourcing SCIM API (2.0)"
+[7]: https://www.firezone.dev/kb/directory-sync?utm_source=chatgpt.com "Directory Sync • Firezone Docs"

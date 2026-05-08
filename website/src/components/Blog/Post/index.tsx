@@ -5,6 +5,7 @@ export default function Post({
   authorTitle,
   authorAvatarSrc,
   title,
+  subtitle,
   date,
   children,
 }: {
@@ -12,6 +13,7 @@ export default function Post({
   authorTitle: string;
   authorAvatarSrc: string;
   title: string;
+  subtitle?: string;
   date: string;
   children: React.ReactNode;
 }) {
@@ -43,6 +45,11 @@ export default function Post({
             <h1 className="mb-4 text-3xl font-bold leading-none tracking-tight lg:mb-6 lg:text-5xl ">
               {title}
             </h1>
+            {subtitle && (
+              <p className="mb-4 text-lg text-neutral-700 lg:mb-6 lg:text-xl">
+                {subtitle}
+              </p>
+            )}
           </header>
           <div className="pt-4">{children}</div>
         </article>
