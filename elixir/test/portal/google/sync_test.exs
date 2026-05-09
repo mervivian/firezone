@@ -582,8 +582,6 @@ defmodule Portal.Google.SyncTest do
       directory = google_directory_fixture(account: account, domain: "example.com")
 
       # Create an old identity that should be deleted
-      old_synced_at = DateTime.utc_now() |> DateTime.add(-3600, :second)
-
       {:ok, old_actor} =
         %Portal.Actor{
           type: :account_user,
@@ -601,8 +599,7 @@ defmodule Portal.Google.SyncTest do
           directory_id: directory.id,
           idp_id: "old_user",
           email: "old@example.com",
-          issuer: "https://accounts.google.com",
-          last_synced_at: old_synced_at
+          issuer: "https://accounts.google.com"
         }
         |> Repo.insert()
 
@@ -661,7 +658,6 @@ defmodule Portal.Google.SyncTest do
     test "skips suspended and archived users and removes their stale identities" do
       account = account_fixture()
       directory = google_directory_fixture(account: account, domain: "example.com")
-      old_synced_at = DateTime.utc_now() |> DateTime.add(-3600, :second)
 
       for {email, idp_id} <- [
             {"suspended@example.com", "suspended_user"},
@@ -684,8 +680,7 @@ defmodule Portal.Google.SyncTest do
             directory_id: directory.id,
             idp_id: idp_id,
             email: email,
-            issuer: "https://accounts.google.com",
-            last_synced_at: old_synced_at
+            issuer: "https://accounts.google.com"
           }
           |> Repo.insert()
       end
@@ -1584,9 +1579,7 @@ defmodule Portal.Google.SyncTest do
           group_sync_mode: :disabled
         )
 
-      # Pre-existing group with stale last_synced_at
-      old_synced_at = DateTime.add(DateTime.utc_now(), -3600, :second)
-
+      # Pre-existing group with no sync_state row → considered stale
       {:ok, existing_group} =
         %Portal.Group{
           id: Ecto.UUID.generate(),
@@ -1596,7 +1589,6 @@ defmodule Portal.Google.SyncTest do
           name: "DevOps",
           type: :static,
           entity_type: :group,
-          last_synced_at: old_synced_at
         }
         |> Repo.insert()
 
@@ -1629,8 +1621,6 @@ defmodule Portal.Google.SyncTest do
           orgunit_sync_enabled: false
         )
 
-      old_synced_at = DateTime.add(DateTime.utc_now(), -3600, :second)
-
       {:ok, existing_ou} =
         %Portal.Group{
           id: Ecto.UUID.generate(),
@@ -1640,7 +1630,6 @@ defmodule Portal.Google.SyncTest do
           name: "Engineering",
           type: :static,
           entity_type: :org_unit,
-          last_synced_at: old_synced_at
         }
         |> Repo.insert()
 
@@ -1673,8 +1662,6 @@ defmodule Portal.Google.SyncTest do
           orgunit_sync_enabled: false
         )
 
-      old_synced_at = DateTime.add(DateTime.utc_now(), -3600, :second)
-
       {:ok, existing_group} =
         %Portal.Group{
           id: Ecto.UUID.generate(),
@@ -1684,7 +1671,6 @@ defmodule Portal.Google.SyncTest do
           name: "DevOps",
           type: :static,
           entity_type: :group,
-          last_synced_at: old_synced_at
         }
         |> Repo.insert()
 
@@ -1697,7 +1683,6 @@ defmodule Portal.Google.SyncTest do
           name: "Engineering",
           type: :static,
           entity_type: :org_unit,
-          last_synced_at: old_synced_at
         }
         |> Repo.insert()
 
@@ -1723,8 +1708,6 @@ defmodule Portal.Google.SyncTest do
           group_sync_mode: :filtered
         )
 
-      old_synced_at = DateTime.add(DateTime.utc_now(), -3600, :second)
-
       # A stale group that does NOT match the firezone-sync prefix
       {:ok, non_matching_group} =
         %Portal.Group{
@@ -1735,7 +1718,6 @@ defmodule Portal.Google.SyncTest do
           name: "DevOps",
           type: :static,
           entity_type: :group,
-          last_synced_at: old_synced_at
         }
         |> Repo.insert()
 

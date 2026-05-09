@@ -484,7 +484,6 @@ defmodule Portal.Entra.SyncTest do
 
       # Create an old identity that won't be in the new sync
       issuer = "https://login.microsoftonline.com/#{directory.tenant_id}/v2.0"
-      old_synced_at = DateTime.utc_now() |> DateTime.add(-3600, :second)
 
       actor =
         Repo.insert!(%Actor{
@@ -506,7 +505,6 @@ defmodule Portal.Entra.SyncTest do
           directory_id: directory.id,
           email: "old@example.com",
           name: "Old User",
-          last_synced_at: old_synced_at
         })
 
       # Mock successful sync with a different user
@@ -571,8 +569,6 @@ defmodule Portal.Entra.SyncTest do
       directory = entra_directory_fixture(account: account, sync_all_groups: true)
 
       # Create an old group that won't be in the new sync
-      old_synced_at = DateTime.utc_now() |> DateTime.add(-3600, :second)
-
       old_group =
         Repo.insert!(%Group{
           id: Ecto.UUID.generate(),
@@ -581,7 +577,6 @@ defmodule Portal.Entra.SyncTest do
           idp_id: "old_group_123",
           name: "Old Group",
           type: :static,
-          last_synced_at: old_synced_at
         })
 
       # Mock successful sync with a different group

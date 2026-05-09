@@ -1478,7 +1478,7 @@ defmodule Portal.Okta.SyncTest do
           idp_id: "okta_user_#{i}",
           issuer: "https://#{directory.okta_domain}",
           email: "user#{i}@example.com",
-          last_synced_at: past_sync_time
+          synced_at: past_sync_time
         )
       end
 
@@ -1548,7 +1548,7 @@ defmodule Portal.Okta.SyncTest do
           account: account,
           directory: base_directory,
           idp_id: "okta_group_#{i}",
-          last_synced_at: past_sync_time
+          synced_at: past_sync_time
         )
       end
 
@@ -1569,7 +1569,7 @@ defmodule Portal.Okta.SyncTest do
           idp_id: "okta_user_#{i}",
           issuer: "https://#{directory.okta_domain}",
           email: "user#{i}@example.com",
-          last_synced_at: past_sync_time
+          synced_at: past_sync_time
         )
       end
 
@@ -1668,7 +1668,7 @@ defmodule Portal.Okta.SyncTest do
           idp_id: "okta_user_#{i}",
           issuer: "https://#{directory.okta_domain}",
           email: "user#{i}@example.com",
-          last_synced_at: past_sync_time
+          synced_at: past_sync_time
         )
       end
 
@@ -1846,6 +1846,127 @@ defmodule Portal.Okta.SyncTest do
                  now,
                  [{"group1", "user1"}, {"group1", "user1"}]
                )
+    end
+
+    test "delete_unsynced_groups removes groups with stale synced_at" do
+      account = account_fixture(features: %{idp_sync: true})
+      directory = okta_directory_fixture(account: account)
+      base_directory = Repo.get_by!(Portal.Directory, id: directory.id, account_id: account.id)
+
+      past_sync_time = DateTime.utc_now() |> DateTime.add(-3600, :second)
+      current_sync_time = DateTime.utc_now()
+
+      _stale_group =
+        Portal.GroupFixtures.group_fixture(
+          account: account,
+          directory: base_directory,
+          idp_id: "stale_group",
+          synced_at: past_sync_time
+        )
+
+      _current_group =
+        Portal.GroupFixtures.group_fixture(
+          account: account,
+          directory: base_directory,
+          idp_id: "current_group",
+          synced_at: current_sync_time
+        )
+
+      _unsynced_group =
+        Portal.GroupFixtures.group_fixture(
+          account: account,
+          directory: base_directory,
+          idp_id: "unsynced_group"
+        )
+
+      {deleted_count, _} =
+        Database.delete_unsynced_groups(account.id, directory.id, current_sync_time)
+
+      assert deleted_count == 2
+
+      remaining = Repo.all(from(g in Portal.Group, where: g.directory_id == ^directory.id))
+      assert length(remaining) == 1
+      assert hd(remaining).idp_id == "current_group"
+    end
+
+    test "delete_unsynced_identities removes identities with stale synced_at" do
+      account = account_fixture(features: %{idp_sync: true})
+      directory = okta_directory_fixture(account: account)
+      base_directory = Repo.get_by!(Portal.Directory, id: directory.id, account_id: account.id)
+
+      past_sync_time = DateTime.utc_now() |> DateTime.add(-3600, :second)
+      current_sync_time = DateTime.utc_now()
+
+      stale_actor =
+        Portal.ActorFixtures.actor_fixture(
+          account: account,
+          type: :account_user,
+          email: "stale@example.com"
+        )
+
+      Portal.IdentityFixtures.identity_fixture(
+        account: account,
+        actor: stale_actor,
+        directory: base_directory,
+        idp_id: "stale_user",
+        issuer: "https://#{directory.okta_domain}",
+        email: "stale@example.com",
+        synced_at: past_sync_time
+      )
+
+      current_actor =
+        Portal.ActorFixtures.actor_fixture(
+          account: account,
+          type: :account_user,
+          email: "current@example.com"
+        )
+
+      Portal.IdentityFixtures.identity_fixture(
+        account: account,
+        actor: current_actor,
+        directory: base_directory,
+        idp_id: "current_user",
+        issuer: "https://#{directory.okta_domain}",
+        email: "current@example.com",
+        synced_at: current_sync_time
+      )
+
+      {deleted_count, _} =
+        Database.delete_unsynced_identities(account.id, directory.id, current_sync_time)
+
+      assert deleted_count == 1
+
+      remaining =
+        Repo.all(from(i in Portal.ExternalIdentity, where: i.directory_id == ^directory.id))
+
+      assert length(remaining) == 1
+      assert hd(remaining).idp_id == "current_user"
+    end
+
+    test "get_synced_group_idp_ids returns only groups synced in current run" do
+      account = account_fixture(features: %{idp_sync: true})
+      directory = okta_directory_fixture(account: account)
+      base_directory = Repo.get_by!(Portal.Directory, id: directory.id, account_id: account.id)
+
+      past_sync_time = DateTime.utc_now() |> DateTime.add(-3600, :second)
+      current_sync_time = DateTime.utc_now()
+
+      Portal.GroupFixtures.group_fixture(
+        account: account,
+        directory: base_directory,
+        idp_id: "old_group",
+        synced_at: past_sync_time
+      )
+
+      Portal.GroupFixtures.group_fixture(
+        account: account,
+        directory: base_directory,
+        idp_id: "current_group",
+        synced_at: current_sync_time
+      )
+
+      idp_ids = Database.get_synced_group_idp_ids(account.id, directory.id, current_sync_time)
+      assert idp_ids == ["current_group"]
     end
   end
 
