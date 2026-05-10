@@ -21,6 +21,56 @@ defmodule Portal.MailerTest do
     end
   end
 
+  describe "deliver/2" do
+    test "refreshes ACS HMAC auth headers on Req retries" do
+      test_pid = self()
+      access_key = Base.encode64("acs-secret")
+      {:ok, attempts} = Agent.start_link(fn -> 0 end)
+
+      Req.Test.stub(Portal.AzureCommunicationServices, fn conn ->
+        attempt = Agent.get_and_update(attempts, fn attempt -> {attempt, attempt + 1} end)
+        send(test_pid, {:acs_attempt, attempt, acs_auth_headers(conn)})
+
+        case attempt do
+          0 ->
+            conn
+            |> Plug.Conn.put_resp_header("retry-after", "1")
+            |> Plug.Conn.put_status(429)
+            |> Req.Test.json(%{"error" => %{"message" => "rate limited"}})
+
+          _ ->
+            conn
+            |> Plug.Conn.put_status(202)
+            |> Req.Test.json(%{"id" => "acs-message-123", "status" => "Running"})
+        end
+      end)
+
+      email =
+        Swoosh.Email.new()
+        |> Swoosh.Email.to({"", "recipient@example.com"})
+        |> Swoosh.Email.from({"", "sender@example.com"})
+        |> Swoosh.Email.subject("Test")
+        |> Swoosh.Email.text_body("body")
+        |> Swoosh.Email.put_private(:client_options,
+          retry: :transient,
+          max_retries: 1
+        )
+
+      assert {:ok, %{id: "acs-message-123", status: "Running"}} =
+               deliver(email,
+                 adapter: Swoosh.Adapters.AzureCommunicationServices,
+                 endpoint: "https://acs.example.com",
+                 access_key: access_key,
+                 req_opts: [plug: {Req.Test, Portal.AzureCommunicationServices}]
+               )
+
+      assert_received {:acs_attempt, 0, first_headers}
+      assert_received {:acs_attempt, 1, second_headers}
+      assert first_headers.x_ms_date != second_headers.x_ms_date
+      assert first_headers.authorization != second_headers.authorization
+    end
+  end
+
   describe "with_account_id/2" do
     test "sets account_id in email private" do
       email = Swoosh.Email.new()
@@ -294,5 +344,20 @@ defmodule Portal.MailerTest do
 
       refute changeset.valid?
     end
+  end
+
+  defp acs_auth_headers(conn) do
+    %{
+      authorization: request_header(conn, "authorization"),
+      x_ms_date: request_header(conn, "x-ms-date")
+    }
+  end
+
+  defp request_header(conn, name) do
+    name = String.downcase(name)
+
+    Enum.find_value(conn.req_headers, fn {header_name, value} ->
+      if String.downcase(header_name) == name, do: value
+    end)
   end
 end
