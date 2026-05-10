@@ -70,8 +70,9 @@ defmodule Portal.Application do
     # 3) Endpoints drain and terminate channels while Presence/PubSub/Repo are alive.
     # 4) Portal{API,Web}.RateLimit stops after endpoint traffic has ceased.
     base_children ++
-      client_session_buffer() ++
-      gateway_session_buffer() ++
+      client_session_queue() ++
+      gateway_session_queue() ++
+      policy_authorization_queue() ++
       rate_limit() ++
       telemetry() ++ oban() ++ endpoint_children ++ replication() ++ [Portal.Cluster]
   end
@@ -109,21 +110,74 @@ defmodule Portal.Application do
     end
   end
 
-  defp client_session_buffer do
-    config = Portal.Config.get_env(:portal, Portal.ClientSession.Buffer, [])
-
-    if Keyword.get(config, :enabled, true) do
-      [Portal.ClientSession.Buffer]
-    else
-      []
-    end
+  defp client_session_queue do
+    queue_child(:client_session_queue,
+      name: :client_session_queue,
+      schema: Portal.ClientSession,
+      flush_interval: :timer.seconds(5),
+      flush_threshold: 1_000,
+      label: "client session",
+      on_failed: fn attrs, _ -> Portal.PG.deliver(attrs.device_id, :disconnect) end,
+      on_confirmed: &PortalAPI.Client.Channel.confirm_session_durability/1,
+      fk_partitions: %{
+        "client_sessions_account_id_fkey" => {:simple, :account_id, Portal.Account},
+        "client_sessions_device_id_fkey" => {:composite, :device_id, Portal.Device},
+        "client_sessions_client_token_id_fkey" =>
+          {:composite, :client_token_id, Portal.ClientToken}
+      }
+    )
   end
 
-  defp gateway_session_buffer do
-    config = Portal.Config.get_env(:portal, Portal.GatewaySession.Buffer, [])
+  defp gateway_session_queue do
+    queue_child(:gateway_session_queue,
+      name: :gateway_session_queue,
+      schema: Portal.GatewaySession,
+      flush_interval: :timer.seconds(5),
+      flush_threshold: 1_000,
+      label: "gateway session",
+      on_failed: fn attrs, _ -> Portal.PG.deliver(attrs.device_id, :disconnect) end,
+      on_confirmed: &PortalAPI.Gateway.Channel.confirm_session_durability/1,
+      fk_partitions: %{
+        "gateway_sessions_account_id_fkey" => {:simple, :account_id, Portal.Account},
+        "gateway_sessions_device_id_fkey" => {:composite, :device_id, Portal.Device},
+        "gateway_sessions_gateway_token_id_fkey" =>
+          {:composite, :gateway_token_id, Portal.GatewayToken}
+      }
+    )
+  end
+
+  defp policy_authorization_queue do
+    queue_child(:policy_authorization_queue,
+      name: :policy_authorization_queue,
+      schema: Portal.PolicyAuthorization,
+      flush_interval: :timer.seconds(1),
+      flush_threshold: 10_000,
+      label: "policy authorization",
+      failed_log_level: :warning,
+      on_failed: &PortalAPI.Client.Channel.revoke_receiver_access/2,
+      on_confirmed: &PortalAPI.Client.Channel.confirm_authz_durability/1,
+      fk_partitions: %{
+        "policy_authorizations_account_id_fkey" => {:simple, :account_id, Portal.Account},
+        "policy_authorizations_policy_id_fkey" => {:composite, :policy_id, Portal.Policy},
+        "policy_authorizations_resource_id_fkey" =>
+          {:composite, :resource_id, Portal.Resource},
+        "policy_authorizations_token_id_fkey" =>
+          {:composite, :token_id, Portal.ClientToken},
+        "policy_authorizations_membership_id_fkey" =>
+          {:composite_optional, :membership_id, Portal.Membership},
+        "policy_authorizations_initiating_device_id_fkey" =>
+          {:composite, :initiating_device_id, Portal.Device},
+        "policy_authorizations_receiving_device_id_fkey" =>
+          {:composite, :receiving_device_id, Portal.Device}
+      }
+    )
+  end
+
+  defp queue_child(config_key, opts) do
+    config = Portal.Config.get_env(:portal, config_key, [])
 
     if Keyword.get(config, :enabled, true) do
-      [Portal.GatewaySession.Buffer]
+      [{Portal.Queue, opts}]
     else
       []
     end

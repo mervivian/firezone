@@ -47,7 +47,7 @@ defmodule PortalAPI.Gateway.Socket do
       version = derive_version(context.user_agent)
       {context, version} = PortalAPI.Sockets.truncate_session_fields(context, version)
       session = build_session(gateway, gateway_token.id, public_key, context, version)
-      GatewaySession.Buffer.insert(session)
+      Portal.Queue.enqueue(:gateway_session_queue, session_attrs(session))
 
       OpenTelemetry.Tracer.set_attributes(%{
         token_id: gateway_token.id,
@@ -105,6 +105,7 @@ defmodule PortalAPI.Gateway.Socket do
 
   defp build_session(gateway, token_id, public_key, context, version) do
     %GatewaySession{
+      id: Ecto.UUID.generate(),
       device_id: gateway.id,
       account_id: gateway.account_id,
       gateway_token_id: token_id,
@@ -117,6 +118,12 @@ defmodule PortalAPI.Gateway.Socket do
       remote_ip_location_lon: context.remote_ip_location_lon,
       version: version
     }
+  end
+
+  defp session_attrs(%GatewaySession{} = session) do
+    session
+    |> Map.from_struct()
+    |> Map.drop([:__meta__, :account, :device, :gateway_token])
   end
 
   defp validate_public_key(attrs) do
