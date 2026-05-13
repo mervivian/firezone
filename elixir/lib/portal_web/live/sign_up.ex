@@ -343,8 +343,8 @@ defmodule PortalWeb.SignUp do
         <div class="flex justify-between items-baseline">
           <dt class="text-xs font-medium text-[var(--text-secondary)]">Sign In URL</dt>
           <dd class="text-sm">
-            <.link class={[link_style()]} href={~p"/#{@account}"}>
-              {url(~p"/#{@account}")}
+            <.link class={[link_style()]} href={~p"/#{@account.slug}"}>
+              {url(~p"/#{@account.slug}")}
             </.link>
           </dd>
         </div>
@@ -618,7 +618,7 @@ defmodule PortalWeb.SignUp do
   @spec send_existing_accounts_email(String.t(), [Portal.Account.t()]) ::
           {:ok, any()} | {:error, any()}
   defp send_existing_accounts_email(email, accounts) do
-    accounts_with_urls = Enum.map(accounts, fn account -> {account, url(~p"/#{account}")} end)
+    accounts_with_urls = Enum.map(accounts, fn account -> {account, url(~p"/#{account.slug}")} end)
 
     Portal.Mailer.AuthEmail.sign_up_account_exists_email(email, accounts_with_urls)
     |> Portal.Mailer.deliver_with_rate_limit(
