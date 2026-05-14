@@ -12,7 +12,7 @@ permissions:
   id-token: "write" # OIDC auth
 
 env:
-  RUSTFLAGS: "--cfg tokio_unstable --deny warnings"
+  RUSTFLAGS: "--cfg tokio_unstable"
   RUSTDOCFLAGS: "--deny warnings"
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
           install_args: --cd rust
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo clippy --all-targets --all-features ${{ steps.setup-rust-stable.outputs.compile-packages }}
+      - run: cargo clippy --all-targets --all-features ${{ steps.setup-rust-stable.outputs.compile-packages }} -- -D warnings
         name: cargo clippy
         shell: bash
       - run: cargo doc --all-features --no-deps --document-private-items ${{ steps.setup-rust-stable.outputs.compile-packages }}
