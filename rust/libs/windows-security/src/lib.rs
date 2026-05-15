@@ -381,4 +381,40 @@ mod tests {
         assert!(dacl_present.as_bool());
         assert!(!dacl.is_null());
     }
+
+    #[test]
+    fn current_user_sid_string_returns_well_formed_sid() {
+        let sid = current_user_sid_string().expect("current process has a user SID");
+        // Sanity-check the shape Windows returns: `S-1-<authority>(-<sub>)+`.
+        // We don't pin the exact value because it varies per CI runner.
+        assert!(sid.starts_with("S-1-"), "{sid}");
+        assert!(sid.split('-').count() >= 4, "{sid}");
+    }
+
+    #[test]
+    fn current_user_sid_string_is_cached() {
+        // Cache-hit path: a second call must return the same string. We can
+        // only assert behavioural equivalence; the thread-local cell is
+        // private.
+        let first = current_user_sid_string().unwrap();
+        let second = current_user_sid_string().unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn current_logon_sid_string_returns_well_formed_sid_or_errors() {
+        // CI runners are interactive enough to have a logon SID; bare-bones
+        // service contexts aren't, and the code path is documented to return
+        // an error there. Either outcome is acceptable for this test — we
+        // just want to surface panics or memory-safety regressions.
+        match current_logon_sid_string() {
+            Ok(sid) => {
+                assert!(sid.starts_with("S-1-"), "{sid}");
+                assert!(sid.split('-').count() >= 4, "{sid}");
+            }
+            Err(_err) => {
+                // Logon SID not available in this test context — see fn docs.
+            }
+        }
+    }
 }

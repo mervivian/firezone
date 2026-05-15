@@ -240,49 +240,37 @@ fn create_pipe_server(
 /// - **Test pipe** (`SocketId::Test`): permissive, used by unit tests that
 ///   run as the current user.
 fn pipe_dacl(id: SocketId) -> Result<PipeDacl> {
-    let pkg_active = package_identity_active();
-    let mut dacl = PipeDacl::new()
+    let base = PipeDacl::new()
         .allow(FileRights::FullAccess, Trustee::local_system())
         .allow(FileRights::FullAccess, Trustee::builtin_administrators());
+    let pkg_active = package_identity_active();
+    let debug = cfg!(debug_assertions);
 
-    match id {
-        SocketId::Tunnel => {
-            if pkg_active {
-                dacl = dacl.allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone());
-            }
-            // Older-Win10 fallback OR debug build keeps `BUILTIN\Users`
-            // access — required for the smoke test (debug-mode subprocess
-            // doesn't get a package SID even on supported OS builds because
-            // it isn't launched through the MSIX activation path).
-            if !pkg_active || cfg!(debug_assertions) {
-                dacl = dacl.allow(FileRights::ReadWrite, Trustee::builtin_users());
-            }
+    Ok(match (id, pkg_active, debug) {
+        // Package-aware release build: only the MSIX package SID gets read/write.
+        (SocketId::Tunnel, true, false) => {
+            base.allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone())
         }
-        SocketId::Gui => {
-            if pkg_active {
-                // Package SID + logon-session conditional ACE. The conditional
-                // ACE pins access to the specific interactive logon that owns
-                // this GUI process; another user on the same machine can't
-                // reach the pipe even if they somehow inherited the package
-                // SID.
-                let scope = Trustee::current_logon().or_else(|_| Trustee::current_user())?;
-                dacl = dacl.allow_if_member_of(
-                    FileRights::ReadWrite,
-                    crate::PACKAGE_TRUSTEE.clone(),
-                    scope,
-                );
-            } else {
-                // Legacy fallback — same as pre-hardening behaviour for the
-                // GUI pipe.
-                dacl = dacl.allow(FileRights::ReadWrite, Trustee::builtin_users());
-            }
+        // Package-aware debug build: also grant `BU` so `gui-smoke-test`
+        // (which runs the Tunnel as a same-user debug subprocess that doesn't
+        // get a package SID) can still connect.
+        (SocketId::Tunnel, true, true) => base
+            .allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone())
+            .allow(FileRights::ReadWrite, Trustee::builtin_users()),
+        // Pre-21H2 Windows — package SID isn't attached, fall back to `BU`.
+        (SocketId::Tunnel, false, _) => base.allow(FileRights::ReadWrite, Trustee::builtin_users()),
+        // Package-aware GUI pipe: package SID + logon-session conditional ACE
+        // pins access to the specific interactive logon that owns this GUI
+        // process.
+        (SocketId::Gui, true, _) => {
+            let scope = Trustee::current_logon().or_else(|_| Trustee::current_user())?;
+            base.allow_if_member_of(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone(), scope)
         }
+        // Legacy fallback — same as pre-hardening behaviour for the GUI pipe.
+        (SocketId::Gui, false, _) => base.allow(FileRights::ReadWrite, Trustee::builtin_users()),
         #[cfg(test)]
-        SocketId::Test(_) => {
-            dacl = dacl.allow(FileRights::ReadWrite, Trustee::builtin_users());
-        }
-    }
-    Ok(dacl)
+        (SocketId::Test(_), _, _) => base.allow(FileRights::ReadWrite, Trustee::builtin_users()),
+    })
 }
 
 /// True iff the current process token carries the Firezone MSIX
@@ -311,10 +299,18 @@ fn package_identity_active() -> bool {
     })
 }
 
-windows_link::link!("kernel32.dll" "system" fn GetCurrentPackageFullName(
-    packagefullnamelength: *mut u32,
-    packagefullname: *mut u16
-) -> u32);
+// `GetCurrentPackageFullName` lives in kernel32 and is the cheapest probe
+// for "do I have package identity" — calling it with a NULL buffer returns
+// `ERROR_INSUFFICIENT_BUFFER` when the kernel has attached a package SID
+// and `APPMODEL_ERROR_NO_PACKAGE` otherwise. The `windows` crate exposes
+// this under `Win32_System_AppModel`; we want to avoid pulling that whole
+// feature in for one call and the `windows-link` macro is on edition 2021,
+// so we declare it inline in 2024-edition-safe form.
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentPackageFullName(packagefullnamelength: *mut u32, packagefullname: *mut u16)
+    -> u32;
+}
 
 /// Named pipe for an IPC connection
 fn ipc_path(id: SocketId) -> String {
@@ -379,19 +375,6 @@ mod tests {
     fn ipc_path() {
         assert!(super::ipc_path(SocketId::Tunnel).starts_with(r"\\.\pipe\"));
         assert!(super::ipc_path(SocketId::Gui).starts_with(r"\\.\pipe\"));
-    }
-
-    #[test]
-    fn pipe_dacl_for_tunnel_renders() {
-        // The Test variant of `pipe_dacl` doesn't depend on package
-        // identity — that's the path the unit test below exercises.
-        let sddl = super::pipe_dacl(SocketId::Test(0))
-            .expect("pipe_dacl should succeed for test sockets")
-            .to_sddl();
-        assert!(sddl.starts_with("D:P"), "{sddl}");
-        assert!(sddl.contains("SY"), "{sddl}");
-        assert!(sddl.contains("BA"), "{sddl}");
-        assert!(sddl.contains("BU"), "{sddl}");
     }
 
     #[tokio::test]

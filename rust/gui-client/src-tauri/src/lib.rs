@@ -42,23 +42,23 @@ pub const RELEASE: &str = concat!("gui-client@", env!("CARGO_PKG_VERSION"));
 /// provision/deprovision the sparse package family.
 pub const PACKAGE_FAMILY_NAME: &str = env!("FIREZONE_PACKAGE_FAMILY_NAME");
 
-/// Kernel-tracked Package SID, baked in at build time from the
-/// manifest identity. Identical to
-/// `(Get-AppxPackage Firezone.Client.GUI).SID` once the sparse MSIX
-/// has registered. The install-time canary asserts parity.
-pub const PACKAGE_SID: &str = env!("FIREZONE_PACKAGE_SID");
-
-/// Compile-time-validated [`Trustee`] wrapping [`PACKAGE_SID`]. If
-/// `FIREZONE_PACKAGE_SID` somehow yielded a malformed string, the
-/// const-eval assertion inside [`Trustee::from_static_sid`] would
-/// fail the build — no chance of stringifying junk into SDDL at
-/// startup.
+/// Compile-time-validated [`Trustee`] wrapping the kernel-tracked
+/// MSIX package SID. The SID itself is baked in at build time from
+/// the manifest identity (`FIREZONE_PACKAGE_SID` env var). If the
+/// derived string isn't a syntactically valid SID, the const-eval
+/// assertion inside [`Trustee::from_static_sid`] fails the build —
+/// no chance of stringifying junk into SDDL at startup.
+///
+/// `as_sddl_str()` on this constant yields the same string
+/// `(Get-AppxPackage Firezone.Client.GUI).SID` returns once the
+/// sparse MSIX has registered; the install-time canary asserts that
+/// parity.
 ///
 /// [`Trustee`]: windows_security::pipe_dacl::Trustee
 /// [`Trustee::from_static_sid`]: windows_security::pipe_dacl::Trustee::from_static_sid
 #[cfg(target_os = "windows")]
 pub const PACKAGE_TRUSTEE: windows_security::pipe_dacl::Trustee =
-    windows_security::pipe_dacl::Trustee::from_static_sid(PACKAGE_SID);
+    windows_security::pipe_dacl::Trustee::from_static_sid(env!("FIREZONE_PACKAGE_SID"));
 
 pub const FIREZONE_CLIENT_GROUP: &str = "firezone-client";
 

@@ -2370,7 +2370,6 @@ dependencies = [
  "url",
  "uuid",
  "windows",
- "windows-link 0.2.1",
  "windows-native-keyring-store",
  "windows-security",
  "windows-service",

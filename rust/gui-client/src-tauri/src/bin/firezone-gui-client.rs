@@ -177,7 +177,7 @@ fn try_main(
                 reason = "stdout is the contract for the CI canary"
             )]
             {
-                println!("{}", firezone_gui_client::PACKAGE_SID);
+                println!("{}", firezone_gui_client::PACKAGE_TRUSTEE.as_sddl_str());
             }
 
             return Ok(());
