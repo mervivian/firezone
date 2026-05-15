@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euox pipefail
 
-# Test-install the MSI package, since it already exists here
-msiexec //i "$BINARY_DEST_PATH.msi" //log install.log //qn
+# Test-install the MSI package, since it already exists here. `//l*v`
+# (verbose, everything) captures CustomAction stdout/stderr so we can
+# see register-sparse's status lines in install.log; the default
+# `//log` flag suppresses them.
+msiexec //i "$BINARY_DEST_PATH.msi" //l*v install.log //qn
 # For debugging
 cat install.log
 # Make sure the Tunnel service is running
