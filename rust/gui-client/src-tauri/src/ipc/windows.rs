@@ -1,6 +1,9 @@
 use super::{NotFound, SocketId};
 use anyhow::{Context as _, Result, bail, ensure};
-use std::{ffi::c_void, io::ErrorKind, os::windows::io::AsRawHandle, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{
+    ffi::c_void, io::ErrorKind, os::windows::io::AsRawHandle, sync::OnceLock, time::Duration,
+};
 use tokio::net::windows::named_pipe;
 use windows::Win32::{
     Foundation::{HANDLE, HLOCAL, LocalFree},
@@ -11,25 +14,11 @@ use windows::Win32::{
     },
     System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
 };
-use windows_security::SecurityDescriptor;
-
-/// SDDL applied to every Firezone named pipe.
-///
-/// The Tunnel pipe is created by the LocalSystem-privileged tunnel service and
-/// must be reachable by the user-mode GUI; the GUI pipe is created by the GUI
-/// itself but uses the same DACL for uniformity.
-///
-/// - `D:P` — protected DACL (don't inherit ACEs).
-/// - `(A;;FA;;;SY)` — Full Access for `LocalSystem` (the tunnel service).
-/// - `(A;;FA;;;BA)` — Full Access for `BUILTIN\Administrators`.
-/// - `(A;;FRFW;;;BU)` — `FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE`
-///   for `BUILTIN\Users`. This is the alias the non-admin GUI runs under and
-///   excludes `NETWORK SERVICE`, `LOCAL SERVICE`, `ANONYMOUS LOGON`, IIS app
-///   pool identities, and arbitrary new service accounts (unlike `AU`).
-const PIPE_SDDL: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFW;;;BU)";
+use windows_security::pipe_dacl::{FileRights, PipeDacl, Trustee};
 
 pub struct Server {
     pipe_path: String,
+    socket_id: SocketId,
 }
 
 /// Alias for the client's half of a platform-specific IPC stream
@@ -136,7 +125,10 @@ impl Server {
     #[expect(clippy::unnecessary_wraps, reason = "Linux impl is fallible")]
     pub(crate) fn new(id: SocketId) -> Result<Self> {
         let pipe_path = ipc_path(id);
-        Ok(Self { pipe_path })
+        Ok(Self {
+            pipe_path,
+            socket_id: id,
+        })
     }
 
     // `&mut self` needed to match the Linux signature
@@ -177,7 +169,7 @@ impl Server {
         const NUM_ITERS: usize = 100;
         const RETRY_INTERVAL: Duration = Duration::from_millis(100);
         for i in 0..NUM_ITERS {
-            match create_pipe_server(&self.pipe_path) {
+            match create_pipe_server(&self.pipe_path, self.socket_id) {
                 Ok(server) => return Ok(server),
                 Err(PipeError::AccessDenied) => {
                     tracing::debug!("PipeError::AccessDenied, sleeping... (loop {i})");
@@ -198,14 +190,19 @@ enum PipeError {
     Other(#[from] anyhow::Error),
 }
 
-fn create_pipe_server(pipe_path: &str) -> Result<named_pipe::NamedPipeServer, PipeError> {
+fn create_pipe_server(
+    pipe_path: &str,
+    id: SocketId,
+) -> Result<named_pipe::NamedPipeServer, PipeError> {
     let mut server_options = named_pipe::ServerOptions::new();
     server_options.first_pipe_instance(true);
 
-    // Build a `SECURITY_ATTRIBUTES` that grants the non-admin GUI (running as
-    // `BUILTIN\Users`) read/write access to the pipe while keeping it shut to
-    // `NETWORK SERVICE`, anonymous logons, and other unintended principals.
-    let sd = SecurityDescriptor::from_sddl(PIPE_SDDL).map_err(PipeError::Other)?;
+    let sd = pipe_dacl(id)
+        .context("Failed to build pipe DACL")
+        .map_err(PipeError::Other)?
+        .build()
+        .context("Failed to materialise pipe DACL into a security descriptor")
+        .map_err(PipeError::Other)?;
     let mut sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: sd.as_raw().0,
@@ -225,15 +222,131 @@ fn create_pipe_server(pipe_path: &str) -> Result<named_pipe::NamedPipeServer, Pi
     }
 }
 
+/// Build the DACL that should protect the pipe for `id`.
+///
+/// - **Tunnel pipe** (`SocketId::Tunnel`): owned by `LocalSystem`, must be
+///   reachable by the GUI's package SID. When the sparse-MSIX package
+///   registers successfully (Win10 21H2+ in practice), the kernel attaches the
+///   package SID to every `Firezone.exe` token and the strict ACE is the only
+///   thing that lets the GUI talk to the service. On legacy Win10 builds the
+///   package SID isn't attached so we fall back to a `BUILTIN\Users` ACE; that
+///   matches the pre-existing posture for those targets. Debug builds always
+///   include `BU` so the `gui-smoke-test` can talk to its in-process Tunnel
+///   subprocess.
+/// - **GUI pipe** (`SocketId::Gui`): the GUI listens, not the Tunnel.
+///   Restrict to the package SID *and* the current logon session so other
+///   user-mode processes on the same machine — even ones that somehow obtain
+///   the package SID — can't drop deep-links into our queue.
+/// - **Test pipe** (`SocketId::Test`): permissive, used by unit tests that
+///   run as the current user.
+fn pipe_dacl(id: SocketId) -> Result<PipeDacl> {
+    let pkg_active = package_identity_active();
+    let mut dacl = PipeDacl::new()
+        .allow(FileRights::FullAccess, Trustee::local_system())
+        .allow(FileRights::FullAccess, Trustee::builtin_administrators());
+
+    match id {
+        SocketId::Tunnel => {
+            if pkg_active {
+                dacl = dacl.allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone());
+            }
+            // Older-Win10 fallback OR debug build keeps `BUILTIN\Users`
+            // access — required for the smoke test (debug-mode subprocess
+            // doesn't get a package SID even on supported OS builds because
+            // it isn't launched through the MSIX activation path).
+            if !pkg_active || cfg!(debug_assertions) {
+                dacl = dacl.allow(FileRights::ReadWrite, Trustee::builtin_users());
+            }
+        }
+        SocketId::Gui => {
+            if pkg_active {
+                // Package SID + logon-session conditional ACE. The conditional
+                // ACE pins access to the specific interactive logon that owns
+                // this GUI process; another user on the same machine can't
+                // reach the pipe even if they somehow inherited the package
+                // SID.
+                let scope = Trustee::current_logon().or_else(|_| Trustee::current_user())?;
+                dacl = dacl.allow_if_member_of(
+                    FileRights::ReadWrite,
+                    crate::PACKAGE_TRUSTEE.clone(),
+                    scope,
+                );
+            } else {
+                // Legacy fallback — same as pre-hardening behaviour for the
+                // GUI pipe.
+                dacl = dacl.allow(FileRights::ReadWrite, Trustee::builtin_users());
+            }
+        }
+        #[cfg(test)]
+        SocketId::Test(_) => {
+            dacl = dacl.allow(FileRights::ReadWrite, Trustee::builtin_users());
+        }
+    }
+    Ok(dacl)
+}
+
+/// True iff the current process token carries the Firezone MSIX
+/// package SID. Computed once, cached for the rest of the process
+/// lifetime — registration state can change only across reboots / MSI
+/// (un)install, both of which restart the process.
+///
+/// The signal we use is `GetCurrentPackageFullName`: it returns
+/// `APPMODEL_ERROR_NO_PACKAGE` (15700) when the process has no
+/// package identity and `ERROR_INSUFFICIENT_BUFFER` (122) when it
+/// does. Anything else (incl. the API being absent on very old
+/// Windows builds) is treated as "no package identity".
+fn package_identity_active() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut len: u32 = 0;
+        // SAFETY: a NULL buffer is the documented sizing pattern. Windows
+        // writes into `len` only and treats the buffer ptr as
+        // `[out, optional]`.
+        let rc = unsafe { GetCurrentPackageFullName(&mut len, std::ptr::null_mut()) };
+        // 122 == ERROR_INSUFFICIENT_BUFFER → there *is* a package full name,
+        // we just didn't pass enough room. That's what we want.
+        let active = rc == 122;
+        tracing::debug!(rc, active, "GetCurrentPackageFullName probe");
+        active
+    })
+}
+
+windows_link::link!("kernel32.dll" "system" fn GetCurrentPackageFullName(
+    packagefullnamelength: *mut u32,
+    packagefullname: *mut u16
+) -> u32);
+
 /// Named pipe for an IPC connection
 fn ipc_path(id: SocketId) -> String {
     let name = match id {
         SocketId::Tunnel => format!("{}_tunnel.ipc", crate::BUNDLE_ID),
-        SocketId::Gui => format!("{}_gui.ipc", crate::BUNDLE_ID),
+        // Embed a per-user hash so multiple interactive sessions on the same
+        // host (RDP / fast user switching) don't fight for the same pipe
+        // name. The salt is the current-user SID, so its 16-hex-char SHA-256
+        // prefix is stable for the user but opaque to onlookers.
+        SocketId::Gui => format!("{}_gui_{}.ipc", crate::BUNDLE_ID, current_user_hash()),
         #[cfg(test)]
         SocketId::Test(id) => format!("{}_test_{id}.ipc", crate::BUNDLE_ID),
     };
     named_pipe_path(&name)
+}
+
+/// 16 lowercase hex chars derived from the current user's SID, cached
+/// for the process lifetime. Falls back to a fixed placeholder if the
+/// token query fails (services, smoke-test rigs) so the GUI pipe
+/// still has *some* path.
+fn current_user_hash() -> &'static str {
+    static CACHE: OnceLock<String> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let sid = Trustee::current_user()
+            .map(|t| t.as_sddl_str().to_owned())
+            .unwrap_or_else(|err| {
+                tracing::warn!(?err, "Couldn't resolve current-user SID; using fallback");
+                "anonymous".to_owned()
+            });
+        let digest = Sha256::digest(sid.as_bytes());
+        hex::encode(&digest[..8])
+    })
 }
 
 /// Returns a valid name for a Windows named pipe
@@ -265,6 +378,20 @@ mod tests {
     #[test]
     fn ipc_path() {
         assert!(super::ipc_path(SocketId::Tunnel).starts_with(r"\\.\pipe\"));
+        assert!(super::ipc_path(SocketId::Gui).starts_with(r"\\.\pipe\"));
+    }
+
+    #[test]
+    fn pipe_dacl_for_tunnel_renders() {
+        // The Test variant of `pipe_dacl` doesn't depend on package
+        // identity — that's the path the unit test below exercises.
+        let sddl = super::pipe_dacl(SocketId::Test(0))
+            .expect("pipe_dacl should succeed for test sockets")
+            .to_sddl();
+        assert!(sddl.starts_with("D:P"), "{sddl}");
+        assert!(sddl.contains("SY"), "{sddl}");
+        assert!(sddl.contains("BA"), "{sddl}");
+        assert!(sddl.contains("BU"), "{sddl}");
     }
 
     #[tokio::test]
@@ -283,7 +410,7 @@ mod tests {
         let (_rx, _tx) =
             crate::ipc::connect::<(), ()>(ID, crate::ipc::ConnectOptions::default()).await?;
 
-        match super::create_pipe_server(&pipe_path) {
+        match super::create_pipe_server(&pipe_path, ID) {
             Err(super::PipeError::AccessDenied) => {}
             Err(error) => {
                 Err(error).context("Expected `PipeError::AccessDenied` but got another error")?

@@ -87,7 +87,9 @@ tracing-journald = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 admx-macro = { workspace = true }
+sha2 = { workspace = true }
 tauri-winrt-notification = "0.7.2"
+windows-link = "0.2.1"
 windows-native-keyring-store = { workspace = true }
 windows-security = { workspace = true }
 windows-service = { workspace = true }

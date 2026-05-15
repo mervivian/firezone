@@ -48,6 +48,18 @@ pub const PACKAGE_FAMILY_NAME: &str = env!("FIREZONE_PACKAGE_FAMILY_NAME");
 /// has registered. The install-time canary asserts parity.
 pub const PACKAGE_SID: &str = env!("FIREZONE_PACKAGE_SID");
 
+/// Compile-time-validated [`Trustee`] wrapping [`PACKAGE_SID`]. If
+/// `FIREZONE_PACKAGE_SID` somehow yielded a malformed string, the
+/// const-eval assertion inside [`Trustee::from_static_sid`] would
+/// fail the build — no chance of stringifying junk into SDDL at
+/// startup.
+///
+/// [`Trustee`]: windows_security::pipe_dacl::Trustee
+/// [`Trustee::from_static_sid`]: windows_security::pipe_dacl::Trustee::from_static_sid
+#[cfg(target_os = "windows")]
+pub const PACKAGE_TRUSTEE: windows_security::pipe_dacl::Trustee =
+    windows_security::pipe_dacl::Trustee::from_static_sid(PACKAGE_SID);
+
 pub const FIREZONE_CLIENT_GROUP: &str = "firezone-client";
 
 #[cfg(target_os = "linux")]

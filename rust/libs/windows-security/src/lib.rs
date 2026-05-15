@@ -11,22 +11,32 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![cfg(windows)]
 
+pub mod pipe_dacl;
+
 use anyhow::{Context as _, Result, ensure};
-use std::{ffi::OsStr, os::windows::ffi::OsStrExt, path::Path, ptr};
+use std::{
+    cell::OnceCell,
+    ffi::{OsStr, c_void},
+    os::windows::ffi::OsStrExt,
+    path::Path,
+    ptr,
+};
 use windows::{
     Win32::{
-        Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree},
+        Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, HLOCAL, LocalFree},
         Security::{
             ACL,
             Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-                SE_FILE_OBJECT, SetNamedSecurityInfoW,
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                SDDL_REVISION_1, SE_FILE_OBJECT, SetNamedSecurityInfoW,
             },
-            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
-            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+            DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
+            PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_GROUPS,
+            TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, TokenLogonSid, TokenUser,
         },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
-    core::{BOOL, PCWSTR},
+    core::{BOOL, PCWSTR, PWSTR},
 };
 
 /// Owned wrapper around a `PSECURITY_DESCRIPTOR` allocated by
@@ -144,6 +154,141 @@ impl Drop for SecurityDescriptor {
 
 fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
+}
+
+/// Reads the calling process's primary-user SID from
+/// `GetTokenInformation(TokenUser)` and renders it as an SDDL
+/// string. Cached per-thread; only the [`pipe_dacl`] module exposes
+/// this externally via [`pipe_dacl::Trustee::current_user`].
+pub(crate) fn current_user_sid_string() -> Result<String> {
+    thread_local! {
+        static CACHE: OnceCell<String> = const { OnceCell::new() };
+    }
+    CACHE.with(|cell| {
+        if let Some(sid) = cell.get() {
+            return Ok(sid.clone());
+        }
+        let sid = read_current_user_sid_string()?;
+        Ok(cell.get_or_init(|| sid).clone())
+    })
+}
+
+fn read_current_user_sid_string() -> Result<String> {
+    let token = open_current_process_token()?;
+    let buf = read_token_information(&token, TokenUser)?;
+
+    // SAFETY: `buf` holds at least one `TOKEN_USER`; the cast yields
+    // a reference whose lifetime is bounded by the `buf` borrow.
+    let token_user = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+    sid_to_string(token_user.User.Sid)
+}
+
+/// Reads the calling process's logon-session SID from
+/// `GetTokenInformation(TokenLogonSid)`. Distinct from the user SID:
+/// changes per interactive logon / RDP session. Errors out in
+/// service / non-interactive contexts that have no logon-SID entry
+/// — callers can fall back to [`current_user_sid_string`] there.
+///
+/// Cached per-thread; exposed externally via
+/// [`pipe_dacl::Trustee::current_logon`].
+pub(crate) fn current_logon_sid_string() -> Result<String> {
+    thread_local! {
+        static CACHE: OnceCell<String> = const { OnceCell::new() };
+    }
+    CACHE.with(|cell| {
+        if let Some(sid) = cell.get() {
+            return Ok(sid.clone());
+        }
+        let sid = read_current_logon_sid_string()?;
+        Ok(cell.get_or_init(|| sid).clone())
+    })
+}
+
+fn read_current_logon_sid_string() -> Result<String> {
+    let token = open_current_process_token()?;
+    let buf = read_token_information(&token, TokenLogonSid)?;
+
+    // SAFETY: `buf` starts with a `TOKEN_GROUPS` (GroupCount +
+    // flexible array of `SID_AND_ATTRIBUTES`); the second deref
+    // walks one entry past the GroupCount, in-bounds when
+    // `GroupCount >= 1`.
+    let groups = unsafe { &*(buf.as_ptr() as *const TOKEN_GROUPS) };
+    ensure!(
+        groups.GroupCount >= 1,
+        "Process token has no logon-session SID (likely a service / non-interactive context)"
+    );
+    let first = unsafe { &*groups.Groups.as_ptr() };
+    sid_to_string(first.Sid)
+}
+
+/// RAII wrapper around a `HANDLE` opened by `OpenProcessToken`. Real
+/// token handles must be released with `CloseHandle` — without this
+/// wrapper each call to [`current_user_sid_string`] would leak a
+/// kernel handle.
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            // SAFETY: `self.0` was produced by `OpenProcessToken`;
+            // we are its sole owner.
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+}
+
+fn open_current_process_token() -> Result<OwnedHandle> {
+    let mut token = HANDLE::default();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that
+    // doesn't need closing; `OpenProcessToken` writes the real
+    // handle into `token`.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+        .context("OpenProcessToken failed")?;
+    Ok(OwnedHandle(token))
+}
+
+/// Allocates a buffer sized for the requested token-information
+/// class and fills it via `GetTokenInformation`. The two-call sizing
+/// pattern is the documented way to discover the length of
+/// variable-sized token info (`TokenUser`, `TokenLogonSid`, ...).
+fn read_token_information(token: &OwnedHandle, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<u8>> {
+    let mut needed: u32 = 0;
+    // SAFETY: a zero-sized buffer with `None` info is the documented
+    // pattern for sizing. The error return is expected.
+    let _ = unsafe { GetTokenInformation(token.0, class, None, 0, &mut needed) };
+
+    let mut buf = vec![0u8; needed as usize];
+    // SAFETY: `buf` has length `needed`; the API writes the
+    // structure for `class` into it.
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            class,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            needed,
+            &mut needed,
+        )
+    }
+    .with_context(|| format!("GetTokenInformation({class:?}) failed"))?;
+    Ok(buf)
+}
+
+fn sid_to_string(sid: PSID) -> Result<String> {
+    let mut wide_ptr: PWSTR = PWSTR::null();
+    // SAFETY: `ConvertSidToStringSidW` writes a fresh allocation to
+    // `wide_ptr` that we own and must release via `LocalFree`.
+    unsafe { ConvertSidToStringSidW(sid, &mut wide_ptr) }
+        .context("ConvertSidToStringSidW failed")?;
+
+    // SAFETY: `wide_ptr` is a non-null pointer to a NUL-terminated
+    // UTF-16 string Windows allocated; `to_string` walks until the
+    // NUL.
+    let s = unsafe { wide_ptr.to_string() }.context("SID buffer was not valid UTF-16")?;
+
+    // SAFETY: we own `wide_ptr` and must release it with `LocalFree`;
+    // no derived pointer is used after this call.
+    unsafe { LocalFree(Some(HLOCAL(wide_ptr.0 as *mut c_void))) };
+    Ok(s)
 }
 
 #[cfg(test)]
