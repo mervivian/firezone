@@ -10,25 +10,40 @@ import Testing
 
 @testable import FirezoneKit
 
+private final class ForcedUserDefaults: UserDefaults {
+  private let forcedKeys: Set<String>
+
+  init?(forcedKeys: Set<String>) {
+    self.forcedKeys = forcedKeys
+
+    super.init(suiteName: "dev.firezone.firezone.tests.\(UUID().uuidString)")
+  }
+
+  override func objectIsForced(forKey defaultName: String) -> Bool {
+    forcedKeys.contains(defaultName)
+  }
+}
+
 @Suite("Configuration Tests")
 struct ConfigurationTests {
 
   // MARK: - Default Values
 
-  @Test("Returns default values when UserDefaults is empty")
+  @Test("Returns default values when provider configuration is empty")
   @MainActor
   func defaultValues() async {
     let defaults = UserDefaults.makeTestDefaults()
     let config = Configuration(userDefaults: defaults)
 
-    #expect(config.authURL == Configuration.defaultAuthURL)
-    #expect(config.apiURL == Configuration.defaultApiURL)
-    #expect(config.logFilter == Configuration.defaultLogFilter)
-    #expect(config.accountSlug == Configuration.defaultAccountSlug)
-    #expect(config.supportURL == Configuration.defaultSupportURL)
-    #expect(config.connectOnStart == Configuration.defaultConnectOnStart)
-    #expect(config.startOnLogin == Configuration.defaultStartOnLogin)
-    #expect(config.disableUpdateCheck == Configuration.defaultDisableUpdateCheck)
+    #expect(config.authURL == ConfigurationDefaults.authURL)
+    #expect(config.apiURL == ConfigurationDefaults.apiURL)
+    #expect(config.logFilter == ConfigurationDefaults.logFilter)
+    #expect(config.accountSlug == ConfigurationDefaults.accountSlug)
+    #expect(config.actorName == ConfigurationDefaults.actorName)
+    #expect(config.supportURL == ConfigurationDefaults.supportURL)
+    #expect(config.connectOnStart == ConfigurationDefaults.connectOnStart)
+    #expect(config.startOnLogin == ConfigurationDefaults.startOnLogin)
+    #expect(config.disableUpdateCheck == ConfigurationDefaults.disableUpdateCheck)
     #expect(config.internetResourceEnabled == false)
     #expect(config.hideAdminPortalMenuItem == false)
     #expect(config.hideResourceList == false)
@@ -55,7 +70,7 @@ struct ConfigurationTests {
 
   // MARK: - Read/Write Properties
 
-  @Test("String properties persist to UserDefaults")
+  @Test("String properties persist to provider configuration")
   @MainActor
   func stringPropertiesPersist() async {
     let defaults = UserDefaults.makeTestDefaults()
@@ -65,23 +80,33 @@ struct ConfigurationTests {
     config.apiURL = "wss://custom.api.url"
     config.logFilter = "trace"
     config.accountSlug = "test-slug"
-    config.supportURL = "https://custom.support.url"
+    config.actorName = "Test User"
 
     #expect(config.authURL == "https://custom.auth.url")
     #expect(config.apiURL == "wss://custom.api.url")
     #expect(config.logFilter == "trace")
     #expect(config.accountSlug == "test-slug")
-    #expect(config.supportURL == "https://custom.support.url")
+    #expect(config.actorName == "Test User")
+    #expect(config.supportURL == ConfigurationDefaults.supportURL)
 
-    // Verify values are actually in UserDefaults
-    #expect(defaults.string(forKey: "authURL") == "https://custom.auth.url")
-    #expect(defaults.string(forKey: "apiURL") == "wss://custom.api.url")
-    #expect(defaults.string(forKey: "logFilter") == "trace")
-    #expect(defaults.string(forKey: "accountSlug") == "test-slug")
-    #expect(defaults.string(forKey: "supportURL") == "https://custom.support.url")
+    let providerConfiguration = config.toProviderConfiguration()
+
+    // User-editable connection settings are no longer written to UserDefaults.
+    #expect(defaults.string(forKey: "authURL") == nil)
+    #expect(defaults.string(forKey: "apiURL") == nil)
+    #expect(defaults.string(forKey: "logFilter") == nil)
+    #expect(defaults.string(forKey: "accountSlug") == nil)
+    #expect(defaults.string(forKey: "actorName") == nil)
+    #expect(providerConfiguration["authURL"] == "https://custom.auth.url")
+    #expect(providerConfiguration["apiURL"] == "wss://custom.api.url")
+    #expect(providerConfiguration["logFilter"] == "trace")
+    #expect(providerConfiguration["accountSlug"] == "test-slug")
+    #expect(providerConfiguration["actorName"] == "Test User")
+
+    #expect(defaults.string(forKey: "supportURL") == nil)
   }
 
-  @Test("Boolean properties persist to UserDefaults")
+  @Test("Boolean properties persist to their configured stores")
   @MainActor
   func booleanPropertiesPersist() async {
     let defaults = UserDefaults.makeTestDefaults()
@@ -89,25 +114,106 @@ struct ConfigurationTests {
 
     config.connectOnStart = true
     config.startOnLogin = true
-    config.disableUpdateCheck = true
     config.internetResourceEnabled = true
-    config.hideAdminPortalMenuItem = true
-    config.hideResourceList = true
 
     #expect(config.connectOnStart == true)
     #expect(config.startOnLogin == true)
-    #expect(config.disableUpdateCheck == true)
+    #expect(config.disableUpdateCheck == false)
     #expect(config.internetResourceEnabled == true)
-    #expect(config.hideAdminPortalMenuItem == true)
-    #expect(config.hideResourceList == true)
+    #expect(config.hideAdminPortalMenuItem == false)
+    #expect(config.hideResourceList == false)
 
-    // Verify values are actually in UserDefaults
-    #expect(defaults.bool(forKey: "connectOnStart") == true)
-    #expect(defaults.bool(forKey: "startOnLogin") == true)
-    #expect(defaults.bool(forKey: "disableUpdateCheck") == true)
-    #expect(defaults.bool(forKey: "internetResourceEnabled") == true)
-    #expect(defaults.bool(forKey: "hideAdminPortalMenuItem") == true)
-    #expect(defaults.bool(forKey: "hideResourceList") == true)
+    let providerConfiguration = config.toProviderConfiguration()
+
+    #expect(defaults.object(forKey: "connectOnStart") == nil)
+    #expect(defaults.object(forKey: "startOnLogin") == nil)
+    #expect(defaults.object(forKey: "internetResourceEnabled") == nil)
+    #expect(providerConfiguration["connectOnStart"] == "true")
+    #expect(providerConfiguration["startOnLogin"] == "true")
+    #expect(providerConfiguration["internetResourceEnabled"] == "true")
+
+    #expect(defaults.object(forKey: "disableUpdateCheck") == nil)
+    #expect(defaults.object(forKey: "hideAdminPortalMenuItem") == nil)
+    #expect(defaults.object(forKey: "hideResourceList") == nil)
+  }
+
+  @Test("MDM-only UserDefaults values are ignored when unforced")
+  @MainActor
+  func mdmOnlyValuesIgnoreUnforcedUserDefaults() async {
+    let defaults = UserDefaults.makeTestDefaults()
+
+    defaults.set(true, forKey: "hideAdminPortalMenuItem")
+    defaults.set(true, forKey: "hideResourceList")
+    defaults.set(true, forKey: "disableUpdateCheck")
+    defaults.set("https://custom.support.url", forKey: "supportURL")
+
+    let config = Configuration(userDefaults: defaults)
+
+    #expect(config.hideAdminPortalMenuItem == false)
+    #expect(config.hideResourceList == false)
+    #expect(config.disableUpdateCheck == ConfigurationDefaults.disableUpdateCheck)
+    #expect(config.supportURL == ConfigurationDefaults.supportURL)
+  }
+
+  @Test("Forced MDM values override effective configuration without changing provider storage")
+  @MainActor
+  func forcedValuesOverrideEffectiveConfigurationOnly() async throws {
+    let defaults = try #require(
+      ForcedUserDefaults(forcedKeys: [
+        Configuration.Keys.apiURL,
+        Configuration.Keys.internetResourceEnabled,
+      ])
+    )
+    defaults.set("wss://mdm.api", forKey: Configuration.Keys.apiURL)
+    defaults.set(true, forKey: Configuration.Keys.internetResourceEnabled)
+
+    let config = Configuration(userDefaults: defaults)
+    config.loadProviderConfiguration(
+      [
+        Configuration.Keys.apiURL: "wss://provider.api",
+        Configuration.Keys.internetResourceEnabled: "false",
+      ],
+      migrateUserDefaults: false
+    )
+
+    #expect(config.apiURL == "wss://mdm.api")
+    #expect(config.internetResourceEnabled == true)
+    #expect(config.toTunnelConfiguration().apiURL == "wss://mdm.api")
+    #expect(config.toTunnelConfiguration().internetResourceEnabled == true)
+
+    let providerConfiguration = config.toProviderConfiguration()
+    #expect(providerConfiguration[Configuration.Keys.apiURL] == "wss://provider.api")
+    #expect(providerConfiguration[Configuration.Keys.internetResourceEnabled] == "false")
+  }
+
+  @Test("Settings save skips forced MDM fields")
+  @MainActor
+  func settingsSaveSkipsForcedFields() async throws {
+    let defaults = try #require(
+      ForcedUserDefaults(forcedKeys: [
+        Configuration.Keys.authURL
+      ])
+    )
+    defaults.set("https://mdm.auth", forKey: Configuration.Keys.authURL)
+
+    let config = Configuration(userDefaults: defaults)
+    config.loadProviderConfiguration(
+      [
+        Configuration.Keys.authURL: "https://provider.auth",
+        Configuration.Keys.apiURL: "wss://provider.api",
+      ],
+      migrateUserDefaults: false
+    )
+
+    let viewModel = SettingsViewModel(configuration: config)
+    viewModel.authURL = "https://attempted-user-change.auth"
+    viewModel.apiURL = "wss://saved-user-change.api"
+
+    try await viewModel.save()
+
+    let providerConfiguration = config.toProviderConfiguration()
+    #expect(providerConfiguration[Configuration.Keys.authURL] == "https://provider.auth")
+    #expect(providerConfiguration[Configuration.Keys.apiURL] == "wss://saved-user-change.api")
   }
 
   // MARK: - TunnelConfiguration
@@ -160,22 +266,24 @@ struct ConfigurationTests {
 
   // MARK: - Published Properties Initialization
 
-  @Test("Published properties initialized from UserDefaults")
+  @Test("Published properties ignore unforced UserDefaults")
   @MainActor
   func publishedPropertiesInitialized() async {
     let defaults = UserDefaults.makeTestDefaults()
 
-    // Set values before creating Configuration
-    defaults.set(true, forKey: "internetResourceEnabled")
+    // Unforced MDM-only keys should not affect Configuration.
     defaults.set(true, forKey: "hideAdminPortalMenuItem")
     defaults.set(true, forKey: "hideResourceList")
 
     let config = Configuration(userDefaults: defaults)
+    config.loadProviderConfiguration(
+      ["internetResourceEnabled": "true"],
+      migrateUserDefaults: false
+    )
 
-    // Published properties should be initialized from UserDefaults
     #expect(config.publishedInternetResourceEnabled == true)
-    #expect(config.publishedHideAdminPortalMenuItem == true)
-    #expect(config.publishedHideResourceList == true)
+    #expect(config.publishedHideAdminPortalMenuItem == false)
+    #expect(config.publishedHideResourceList == false)
   }
 
   // MARK: - Reactive Published Property Updates
@@ -205,30 +313,20 @@ struct ConfigurationTests {
     }
   }
 
-  @Test("Published properties update when UserDefaults changes externally")
+  @Test("Published MDM-only properties ignore unforced UserDefaults changes")
   @MainActor
   func publishedPropertiesUpdateFromExternalChanges() async {
     let defaults = UserDefaults.makeTestDefaults()
     let config = Configuration(userDefaults: defaults)
 
-    // Initially false
-    #expect(config.publishedInternetResourceEnabled == false)
+    #expect(config.publishedHideResourceList == false)
 
-    // Wait for the published property to update to the expected value
-    await confirmation { confirm in
-      let cancellable = config.$publishedInternetResourceEnabled
-        .sink { value in
-          if value { confirm() }  // only confirm when true
-        }
+    defaults.set(true, forKey: "hideResourceList")
 
-      // Simulate an external change (e.g., from MDM or another process)
-      defaults.set(true, forKey: "internetResourceEnabled")
+    // Give async notification time to propagate
+    try? await Task.sleep(for: .milliseconds(100))
 
-      // Give async notification time to propagate
-      try? await Task.sleep(for: .milliseconds(100))
-
-      _ = cancellable
-    }
+    #expect(config.publishedHideResourceList == false)
   }
 
   @Test("objectWillChange emits when properties change")
@@ -259,7 +357,7 @@ struct ConfigurationTests {
 
   // MARK: - Reading Pre-existing Values
 
-  @Test("Configuration reads pre-existing UserDefaults values")
+  @Test("Configuration migrates pre-existing UserDefaults values")
   @MainActor
   func readsPreExistingValues() async {
     let defaults = UserDefaults.makeTestDefaults()
@@ -267,13 +365,16 @@ struct ConfigurationTests {
     // Set values before creating Configuration
     defaults.set("https://preset.auth", forKey: "authURL")
     defaults.set("wss://preset.api", forKey: "apiURL")
+    defaults.set("Preset User", forKey: "actorName")
     defaults.set(true, forKey: "connectOnStart")
     defaults.set(true, forKey: "internetResourceEnabled")
 
     let config = Configuration(userDefaults: defaults)
+    config.loadProviderConfiguration([:], migrateUserDefaults: true)
 
     #expect(config.authURL == "https://preset.auth")
     #expect(config.apiURL == "wss://preset.api")
+    #expect(config.actorName == "Preset User")
     #expect(config.connectOnStart == true)
     #expect(config.internetResourceEnabled == true)
 
@@ -283,17 +384,25 @@ struct ConfigurationTests {
 
   // MARK: - Multiple Configuration Instances
 
-  @Test("Multiple Configuration instances share same UserDefaults")
+  @Test("Provider configuration round trips between Configuration instances")
   @MainActor
-  func sharedUserDefaults() async throws {
+  func providerConfigurationRoundTrip() async throws {
     let defaults = UserDefaults.makeTestDefaults()
     let config1 = Configuration(userDefaults: defaults)
     let config2 = Configuration(userDefaults: defaults)
 
     config1.authURL = "https://shared.url"
+    config1.apiURL = "wss://shared.api"
+    config1.actorName = "Shared User"
+    config1.internetResourceEnabled = true
+    let providerConfiguration = config1.toProviderConfiguration()
 
-    // config2 should see the same value (reading from same UserDefaults)
+    config2.loadProviderConfiguration(providerConfiguration, migrateUserDefaults: false)
+
     #expect(config2.authURL == "https://shared.url")
+    #expect(config2.apiURL == "wss://shared.api")
+    #expect(config2.actorName == "Shared User")
+    #expect(config2.internetResourceEnabled == true)
   }
 }
 
@@ -340,6 +449,24 @@ struct TunnelConfigurationCodableTests {
     #expect(config.logFilter == "info")
     #expect(config.internetResourceEnabled == false)
   }
+
+  @Test("TunnelConfiguration builds from provider configuration")
+  func fromProviderConfiguration() throws {
+    let config = try #require(
+      TunnelConfiguration.fromProviderConfiguration([
+        "apiURL": "wss://provider.api",
+        "accountSlug": "provider-slug",
+        "logFilter": "debug",
+        "internetResourceEnabled": "true",
+      ])
+    )
+
+    #expect(config.apiURL == "wss://provider.api")
+    #expect(config.accountSlug == "provider-slug")
+    #expect(config.logFilter == "debug")
+    #expect(config.internetResourceEnabled == true)
+  }
+
 }
 
 // MARK: - ProviderMessage Codable Tests

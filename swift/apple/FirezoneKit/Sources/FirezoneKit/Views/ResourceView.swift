@@ -241,14 +241,17 @@ import SwiftUI
     private let configuration = Configuration.shared
 
     @Published private(set) var enabled: Bool
+    @Published private(set) var isForced: Bool
 
     init() {
       self.enabled = configuration.internetResourceEnabled
+      self.isForced = configuration.isInternetResourceEnabledForced
 
-      configuration.$publishedInternetResourceEnabled
+      configuration.objectWillChange
         .receive(on: RunLoop.main)
-        .sink(receiveValue: { [self] enabled in
-          self.enabled = enabled
+        .sink(receiveValue: { [self] _ in
+          self.enabled = configuration.internetResourceEnabled
+          self.isForced = configuration.isInternetResourceEnabledForced
         })
         .store(in: &cancellables)
     }
@@ -279,6 +282,7 @@ import SwiftUI
           }
         }
       )
+      .disabled(viewModel.isForced)
     }
   }
 

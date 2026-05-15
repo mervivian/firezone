@@ -35,25 +35,21 @@ enum IPCClient {
   // Auto-connect
   @MainActor
   static func start(
-    session: NETunnelProviderSession, configuration: TunnelConfiguration
+    session: NETunnelProviderSession,
+    configuration: TunnelConfiguration
   ) throws {
-    let configData = try encoder.encode(configuration)
-    let options: [String: NSObject] = [
-      "configuration": configData as NSObject
-    ]
-    try session.startTunnel(options: options)
+    try session.startTunnel(options: startOptions(configuration: configuration))
   }
 
   // Sign in
   @MainActor
   static func start(
-    session: NETunnelProviderSession, token: String, configuration: TunnelConfiguration
+    session: NETunnelProviderSession,
+    token: String,
+    configuration: TunnelConfiguration
   ) throws {
-    let configData = try encoder.encode(configuration)
-    let options: [String: NSObject] = [
-      "token": token as NSObject,
-      "configuration": configData as NSObject,
-    ]
+    var options = try startOptions(configuration: configuration)
+    options["token"] = token as NSObject
 
     try session.startTunnel(options: options)
   }
@@ -195,6 +191,15 @@ enum IPCClient {
         continuation.resume(throwing: error)
       }
     }
+  }
+
+  private static func startOptions(configuration: TunnelConfiguration) throws -> [String: NSObject]
+  {
+    let data = try encoder.encode(configuration)
+
+    return [
+      "configuration": data as NSObject
+    ]
   }
 
   /// On macOS, the tunnel needs to be in a connected, connecting, or reasserting state for the utun to be removed

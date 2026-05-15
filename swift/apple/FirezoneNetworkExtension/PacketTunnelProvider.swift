@@ -17,6 +17,7 @@ enum PacketTunnelProviderError: Error {
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
   private var adapter: Adapter?
+  private var tunnelConfiguration: TunnelConfiguration?
   /// Task for consuming commands from Adapter. Uses CancellableTask for RAII cleanup.
   private var commandConsumerTask: CancellableTask?
 
@@ -29,7 +30,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
   private var logCleanupTask: CancellableTask?
 
   private var logExportState: LogExportState = .idle
-  private var tunnelConfiguration: TunnelConfiguration?
   // swiftlint:disable:next no_userdefaults_standard - NetworkExtension DI entry point uses shared UserDefaults store
   private let defaults = UserDefaults.standard
 
@@ -50,7 +50,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       "NetworkExtension starting - Version: \(version), Build: \(build), Bundle ID: \(bundleId)")
 
     migrateFirezoneId()
-    self.tunnelConfiguration = TunnelConfiguration.tryLoad(from: defaults)
   }
 
   override func startTunnel(
@@ -70,26 +69,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
     let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
     Log.info("Starting tunnel - Version: \(version), Build: \(build)")
-
-    // Try to load configuration from options first (passed from client at startup)
-    if let configData = options?["configuration"] as? Data {
-      do {
-        let decoder = PropertyListDecoder()
-        let configFromOptions = try decoder.decode(TunnelConfiguration.self, from: configData)
-        // Save it for future fallback (e.g., system-initiated restarts)
-        configFromOptions.save(to: defaults)
-        self.tunnelConfiguration = configFromOptions
-      } catch {
-        Log.error(error)
-      }
-    }
-
-    // If the tunnel starts up before the GUI after an upgrade crossing the 1.4.15 version boundary,
-    // the old system settings-based config will still be present and the new configuration will be empty.
-    // So handle that edge case gracefully.
-    let legacyConfiguration = VPNConfigurationManager.legacyConfiguration(
-      protocolConfiguration: protocolConfiguration as? NETunnelProviderProtocol
-    )
 
     // Extract token from options before any async work
     let passedToken = options?["token"] as? String
@@ -112,20 +91,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
     let firezoneId = FirezoneId(uuid: rawId)
 
-    guard let apiURL = legacyConfiguration?["apiURL"] ?? tunnelConfiguration?.apiURL,
-      let logFilter = legacyConfiguration?["logFilter"] ?? tunnelConfiguration?.logFilter,
-      let accountSlug = legacyConfiguration?["accountSlug"] ?? tunnelConfiguration?.accountSlug
-    else {
+    guard let tunnelConfiguration = tunnelConfiguration(from: options) else {
       completionHandler(PacketTunnelProviderError.tunnelConfigurationIsInvalid)
       return
     }
 
+    let apiURL = tunnelConfiguration.apiURL
+    let logFilter = tunnelConfiguration.logFilter
+    let accountSlug = tunnelConfiguration.accountSlug
+
     Telemetry.setEnvironmentOrClose(apiURL)
     Telemetry.setUser(firezoneId: firezoneId.encoded, accountSlug: accountSlug)
-
-    let enabled = legacyConfiguration?["internetResourceEnabled"]
-    let internetResourceEnabled =
-      enabled != nil ? enabled == "true" : (tunnelConfiguration?.internetResourceEnabled ?? false)
 
     // Create command channel for Adapter -> Provider communication
     let (commandSender, commandReceiver): (Sender<ProviderCommand>, Receiver<ProviderCommand>) =
@@ -137,7 +113,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       deviceId: firezoneId.uuid,
       logFilter: logFilter,
       accountSlug: accountSlug,
-      internetResourceEnabled: internetResourceEnabled,
+      internetResourceEnabled: tunnelConfiguration.internetResourceEnabled,
       providerCommandSender: commandSender
     )
 
@@ -176,6 +152,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }()
 
     return Token(passedToken) ?? keychainToken
+  }
+
+  private func tunnelConfiguration(
+    // swiftlint:disable:next discouraged_optional_collection - Apple API signature
+    from options: [String: NSObject]?
+  ) -> TunnelConfiguration? {
+    let providerConfiguration = TunnelConfiguration.fromProviderConfiguration(
+      (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+    )
+
+    let optionsConfiguration = decodeOptionsConfiguration(options)
+    let tunnelConfiguration =
+      optionsConfiguration ?? providerConfiguration ?? self.tunnelConfiguration
+    self.tunnelConfiguration = tunnelConfiguration
+
+    return tunnelConfiguration
+  }
+
+  private func decodeOptionsConfiguration(
+    // swiftlint:disable:next discouraged_optional_collection - Apple API signature
+    _ options: [String: NSObject]?
+  ) -> TunnelConfiguration? {
+    guard let configuration = options?["configuration"] else { return nil }
+    guard let data = configuration as? Data else { return nil }
+
+    do {
+      return try PropertyListDecoder().decode(TunnelConfiguration.self, from: data)
+    } catch {
+      Log.error(error)
+      return nil
+    }
   }
 
   override func wake() {
@@ -218,9 +225,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
       switch providerMessage {
 
       case .setConfiguration(let tunnelConfiguration):
-        tunnelConfiguration.save(to: defaults)
         self.tunnelConfiguration = tunnelConfiguration
-
         let adapter = self.adapter
         Task { @Sendable in
           await adapter?.setInternetResourceEnabled(tunnelConfiguration.internetResourceEnabled)
@@ -504,45 +509,5 @@ private final class PacketTunnelProviderActorBridge: @unchecked Sendable {
     DispatchQueue.main.async {
       provider.handleProviderCommand(command)
     }
-  }
-}
-
-// Increase usefulness of TunnelConfiguration now that we're over the IPC barrier
-extension TunnelConfiguration {
-  func save(to userDefaults: UserDefaults) {
-    let key = "configurationCache"
-
-    let dict: [String: Any] = [
-      "apiURL": apiURL,
-      "logFilter": logFilter,
-      "accountSlug": accountSlug,
-      "internetResourceEnabled": internetResourceEnabled,
-    ]
-
-    userDefaults.set(dict, forKey: key)
-  }
-
-  static func tryLoad(from userDefaults: UserDefaults) -> TunnelConfiguration? {
-    let key = "configurationCache"
-
-    guard let dict = userDefaults.dictionary(forKey: key)
-    else {
-      return nil
-    }
-
-    guard let apiURL = dict["apiURL"] as? String,
-      let logFilter = dict["logFilter"] as? String,
-      let accountSlug = dict["accountSlug"] as? String,
-      let internetResourceEnabled = dict["internetResourceEnabled"] as? Bool
-    else {
-      return nil
-    }
-
-    return TunnelConfiguration(
-      apiURL: apiURL,
-      accountSlug: accountSlug,
-      logFilter: logFilter,
-      internetResourceEnabled: internetResourceEnabled
-    )
   }
 }

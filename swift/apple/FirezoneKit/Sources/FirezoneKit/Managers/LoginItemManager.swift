@@ -5,8 +5,15 @@ import Foundation
   import ServiceManagement
 #endif
 
-enum LoginItemManager {
-  static func syncStartOnLogin(startOnLogin: Bool) async throws {
+@MainActor
+public protocol LoginItemManaging {
+  func syncStartOnLogin(startOnLogin: Bool) async throws
+}
+
+public struct LoginItemManager: LoginItemManaging {
+  public init() {}
+
+  public func syncStartOnLogin(startOnLogin: Bool) async throws {
     #if os(macOS)
       SentrySDK.pauseAppHangTracking()
       defer { SentrySDK.resumeAppHangTracking() }

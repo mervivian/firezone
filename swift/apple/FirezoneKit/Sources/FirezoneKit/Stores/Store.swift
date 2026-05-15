@@ -57,9 +57,11 @@ public final class Store: ObservableObject {
   private var stateUpdateTask: Task<Void, Never>?
   public let configuration: Configuration
   private var lastSavedConfiguration: TunnelConfiguration?
+  private var lastSavedProviderConfiguration: [String: String] = [:]
   private var vpnConfigurationManager: VPNConfigurationManager?
   private var cancellables: Set<AnyCancellable> = []
   private let tunnelManagerFactory: TunnelProviderManagerFactory
+  private let loginItemManager: any LoginItemManaging
 
   // Track which session expired alerts have been shown to prevent duplicates
   private var shownAlertIds: Set<String>
@@ -78,6 +80,7 @@ public final class Store: ObservableObject {
       configuration: Configuration? = nil,
       sessionNotification: SessionNotificationProtocol = SessionNotification(),
       systemExtensionManager: (any SystemExtensionManagerProtocol)? = nil,
+      loginItemManager: any LoginItemManaging = LoginItemManager(),
       tunnelManagerFactory: TunnelProviderManagerFactory = NETunnelProviderManagerFactory(),
       // swiftlint:disable:next no_userdefaults_standard
       userDefaults: UserDefaults = .standard
@@ -86,10 +89,11 @@ public final class Store: ObservableObject {
       self.updateChecker = UpdateChecker(configuration: configuration, userDefaults: userDefaults)
       self.sessionNotification = sessionNotification
       self.systemExtensionManager = systemExtensionManager ?? SystemExtensionManager()
+      self.loginItemManager = loginItemManager
       self.tunnelManagerFactory = tunnelManagerFactory
       self.userDefaults = userDefaults
       self.favorites = Favorites(userDefaults: userDefaults)
-      self.actorName = userDefaults.string(forKey: "actorName") ?? "Unknown user"
+      self.actorName = self.configuration.actorName
       self.shownAlertIds = Set(userDefaults.stringArray(forKey: "shownAlertIds") ?? [])
       self.postInit()
     }
@@ -97,16 +101,18 @@ public final class Store: ObservableObject {
     public init(
       configuration: Configuration? = nil,
       sessionNotification: SessionNotificationProtocol = SessionNotification(),
+      loginItemManager: any LoginItemManaging = LoginItemManager(),
       tunnelManagerFactory: TunnelProviderManagerFactory = NETunnelProviderManagerFactory(),
       // swiftlint:disable:next no_userdefaults_standard
       userDefaults: UserDefaults = .standard
     ) {
       self.configuration = configuration ?? Configuration.shared
       self.sessionNotification = sessionNotification
+      self.loginItemManager = loginItemManager
       self.tunnelManagerFactory = tunnelManagerFactory
       self.userDefaults = userDefaults
       self.favorites = Favorites(userDefaults: userDefaults)
-      self.actorName = userDefaults.string(forKey: "actorName") ?? "Unknown user"
+      self.actorName = self.configuration.actorName
       self.shownAlertIds = Set(userDefaults.stringArray(forKey: "shownAlertIds") ?? [])
       self.postInit()
     }
@@ -117,30 +123,43 @@ public final class Store: ObservableObject {
       do { try await WebAuthSession.signIn(store: self) } catch { Log.error(error) }
     }
 
-    // We monitor for any configuration changes and tell the tunnel service about them
+    // We monitor for configuration changes and persist them to the VPN provider configuration.
+    // If the tunnel is running, also push the effective tunnel configuration over IPC.
     self.configuration.objectWillChange
       .receive(on: DispatchQueue.main)
       .debounce(for: .seconds(0.3), scheduler: DispatchQueue.main)  // These happen quite frequently
       .sink(receiveValue: { [weak self] _ in
         guard let self = self else { return }
-        let current = self.configuration.toTunnelConfiguration()
+        let currentTunnelConfiguration = self.configuration.toTunnelConfiguration()
+        let currentProviderConfiguration = self.configuration.toProviderConfiguration()
+
+        self.objectWillChange.send()
 
         if self.vpnConfigurationManager == nil {
           // No manager yet, nothing to update
           return
         }
 
-        if self.lastSavedConfiguration == current {
-          // No changes
+        if self.lastSavedProviderConfiguration == currentProviderConfiguration
+          && self.lastSavedConfiguration == currentTunnelConfiguration
+        {
           return
         }
 
-        self.lastSavedConfiguration = current
+        self.lastSavedProviderConfiguration = currentProviderConfiguration
+        self.lastSavedConfiguration = currentTunnelConfiguration
 
         Task {
           do {
-            guard let session = try self.manager().session() else { return }
-            try await IPCClient.setConfiguration(session: session, current)
+            try await self.loginItemManager.syncStartOnLogin(
+              startOnLogin: self.configuration.startOnLogin)
+            try await self.manager().save(configuration: self.configuration)
+
+            guard let session = try self.manager().session(),
+              [.connected, .connecting, .reasserting].contains(session.status)
+            else { return }
+
+            try await IPCClient.setConfiguration(session: session, currentTunnelConfiguration)
           } catch {
             Log.error(error)
           }
@@ -175,7 +194,7 @@ public final class Store: ObservableObject {
     // When everything loads correctly, we attempt to start the tunnel if connectOnStart is enabled.
     Task {
       do {
-        try await LoginItemManager.syncStartOnLogin(startOnLogin: configuration.startOnLogin)
+        try await loginItemManager.syncStartOnLogin(startOnLogin: configuration.startOnLogin)
       } catch {
         Log.error(error)
       }
@@ -318,12 +337,8 @@ public final class Store: ObservableObject {
   /// extension daemon isn't ready yet). Steps that run inside the retry loop are
   /// idempotent, so retrying is safe.
   private func startupSequence() async {
-    // Configure telemetry once before retryable steps — it only depends on the
-    // API URL which is fixed, and calling setEnvironmentOrClose multiple times
-    // can close the Sentry SDK with no way to reopen it.
-    Telemetry.setEnvironmentOrClose(configuration.apiURL)
-
     let maxAttempts = 4
+    var telemetryConfigured = false
 
     for attempt in 0..<maxAttempts {
       do {
@@ -331,6 +346,10 @@ public final class Store: ObservableObject {
         try await initSystemExtension()
         Log.debug("Startup: initVPNConfiguration")
         try await initVPNConfiguration()
+        if !telemetryConfigured {
+          Telemetry.setEnvironmentOrClose(configuration.apiURL)
+          telemetryConfigured = true
+        }
         Log.debug("Startup: setupTunnelObservers")
         try await setupTunnelObservers()
         Log.debug("Startup: maybeAutoConnect")
@@ -386,7 +405,10 @@ public final class Store: ObservableObject {
   private func initVPNConfiguration() async throws {
     // Try to load existing configuration
     if let manager = try await VPNConfigurationManager.load(using: tunnelManagerFactory) {
-      try await manager.maybeMigrateConfiguration()
+      try await manager.loadConfiguration(into: configuration, userDefaults: userDefaults)
+      actorName = configuration.actorName
+      lastSavedProviderConfiguration = configuration.toProviderConfiguration()
+      lastSavedConfiguration = configuration.toTunnelConfiguration()
       self.vpnConfigurationManager = manager
       SharedAccess.markAppRunning()
     } else {
@@ -396,6 +418,7 @@ public final class Store: ObservableObject {
 
   private func maybeAutoConnect() async throws {
     if configuration.connectOnStart {
+      try await manager().save(configuration: configuration)
       try await manager().enable()
       guard let session = try manager().session() else {
         throw VPNConfigurationManagerError.managerNotInitialized
@@ -408,6 +431,11 @@ public final class Store: ObservableObject {
     self.vpnConfigurationManager = try await VPNConfigurationManager(
       manager: tunnelManagerFactory.createManager()
     )
+
+    try await manager().loadConfiguration(into: configuration, userDefaults: userDefaults)
+    actorName = configuration.actorName
+    lastSavedProviderConfiguration = configuration.toProviderConfiguration()
+    lastSavedConfiguration = configuration.toTunnelConfiguration()
 
     try await setupTunnelObservers()
     SharedAccess.markAppRunning()
@@ -438,12 +466,13 @@ public final class Store: ObservableObject {
     let actorName = authResponse.actorName
     let accountSlug = authResponse.accountSlug
 
-    // This is only shown in the GUI, cache it here
+    // This is only shown in the GUI.
+    configuration.actorName = actorName
     self.actorName = actorName
-    userDefaults.set(actorName, forKey: "actorName")
 
     configuration.accountSlug = accountSlug
 
+    try await manager().save(configuration: configuration)
     try await manager().enable()
 
     // Clear shown alerts when starting a new session so user can see new errors
@@ -453,12 +482,13 @@ public final class Store: ObservableObject {
     // Clear notified unreachable resources for fresh session
     unreachableResources.removeAll()
 
-    // Bring the tunnel up and send it a token and configuration to start
+    // Bring the tunnel up and send it a token to start
     guard let session = try manager().session() else {
       throw VPNConfigurationManagerError.managerNotInitialized
     }
     try IPCClient.start(
-      session: session, token: authResponse.token,
+      session: session,
+      token: authResponse.token,
       configuration: configuration.toTunnelConfiguration()
     )
   }
