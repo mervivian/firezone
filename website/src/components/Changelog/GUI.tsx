@@ -25,6 +25,12 @@ export default function GUI({ os }: { os: OS }) {
             {"Restricts access to Firezone's configuration directory."}
           </ChangeItem>
         )}
+        {os == OS.Windows && (
+          <ChangeItem pull={13275}>
+            Locks down the local communication channel between the GUI and
+            Tunnel service so only Firezone can use it.
+          </ChangeItem>
+        )}
       </Unreleased>
       <Entry version="1.5.12" date={new Date("2026-04-27")}>
         <ChangeItem pull={12684}>
