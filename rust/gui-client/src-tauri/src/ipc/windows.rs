@@ -306,6 +306,10 @@ fn package_identity_active() -> bool {
 // this under `Win32_System_AppModel`; we want to avoid pulling that whole
 // feature in for one call and the `windows-link` macro is on edition 2021,
 // so we declare it inline in 2024-edition-safe form.
+#[allow(
+    non_snake_case,
+    reason = "Win32 export name; must match kernel32 exactly"
+)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentPackageFullName(packagefullnamelength: *mut u32, packagefullname: *mut u16)
