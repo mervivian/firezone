@@ -249,13 +249,13 @@ fn pipe_dacl(id: SocketId) -> Result<PipeDacl> {
     Ok(match (id, pkg_active, debug) {
         // Package-aware release build: only the MSIX package SID gets read/write.
         (SocketId::Tunnel, true, false) => {
-            base.allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone())
+            base.allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE)
         }
         // Package-aware debug build: also grant `BU` so `gui-smoke-test`
         // (which runs the Tunnel as a same-user debug subprocess that doesn't
         // get a package SID) can still connect.
         (SocketId::Tunnel, true, true) => base
-            .allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone())
+            .allow(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE)
             .allow(FileRights::ReadWrite, Trustee::builtin_users()),
         // Pre-21H2 Windows — package SID isn't attached, fall back to `BU`.
         (SocketId::Tunnel, false, _) => base.allow(FileRights::ReadWrite, Trustee::builtin_users()),
@@ -264,7 +264,7 @@ fn pipe_dacl(id: SocketId) -> Result<PipeDacl> {
         // process.
         (SocketId::Gui, true, _) => {
             let scope = Trustee::current_logon().or_else(|_| Trustee::current_user())?;
-            base.allow_if_member_of(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE.clone(), scope)
+            base.allow_if_member_of(FileRights::ReadWrite, crate::PACKAGE_TRUSTEE, scope)
         }
         // Legacy fallback — same as pre-hardening behaviour for the GUI pipe.
         (SocketId::Gui, false, _) => base.allow(FileRights::ReadWrite, Trustee::builtin_users()),

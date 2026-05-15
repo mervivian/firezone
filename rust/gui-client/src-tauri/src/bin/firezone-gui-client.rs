@@ -158,7 +158,6 @@ fn try_main(
 
             return Ok(());
         }
-        #[cfg(target_os = "windows")]
         Some(Cmd::Debug {
             command: DebugCommand::SingleInstance,
         }) => {
@@ -166,6 +165,7 @@ fn try_main(
 
             return Ok(());
         }
+        #[cfg(target_os = "windows")]
         Some(Cmd::Debug {
             command: DebugCommand::PrintPackageSid,
         }) => {
