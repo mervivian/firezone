@@ -158,6 +158,7 @@ fn try_main(
 
             return Ok(());
         }
+        #[cfg(target_os = "windows")]
         Some(Cmd::Debug {
             command: DebugCommand::SingleInstance,
         }) => {
@@ -368,6 +369,9 @@ enum DebugCommand {
     SingleInstance,
     /// Print the build-time-baked Package SID. Used by the install
     /// canary to assert parity with `(Get-AppxPackage …).Sid`.
+    /// Windows-only: the SID is an MSIX concept and the canary that
+    /// reads it only runs on Windows.
+    #[cfg(target_os = "windows")]
     PrintPackageSid,
 }
 
