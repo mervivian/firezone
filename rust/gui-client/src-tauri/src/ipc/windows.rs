@@ -312,8 +312,13 @@ fn package_identity_active() -> bool {
 )]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn GetCurrentPackageFullName(packagefullnamelength: *mut u32, packagefullname: *mut u16)
-    -> u32;
+    // Edition 2024: items inside `unsafe extern { ... }` need an explicit
+    // `safe` or `unsafe` qualifier. This one's `unsafe` — the caller must
+    // uphold the FFI buffer-pointer contract.
+    unsafe fn GetCurrentPackageFullName(
+        packagefullnamelength: *mut u32,
+        packagefullname: *mut u16,
+    ) -> u32;
 }
 
 /// Named pipe for an IPC connection
