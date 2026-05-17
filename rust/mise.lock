@@ -222,6 +222,10 @@ backend = "http:mold"
 checksum = "sha256:a3696680d99e692970590a178bc3a33d78d60d1c6dc9db7a11b557b02b751f5d"
 url = "https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz"
 
+[tools."http:mold"."platforms.linux-arm64"]
+checksum = "sha256:946de2774b06a71346bd59b55fddba610b65b8d93c3a4a1559cc84e103472710"
+url = "https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-aarch64-linux.tar.gz"
+
 [tools."github:taiki-e/cargo-llvm-cov"."platforms.linux-arm64"]
 checksum = "sha256:8187c40fa3cbef6fe65e426bee24ddcfefee943dc68bdb0617f0293a092941af"
 url = "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.6.21/cargo-llvm-cov-aarch64-unknown-linux-gnu.tar.gz"
