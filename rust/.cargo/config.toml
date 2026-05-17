@@ -1,14 +1,8 @@
 [target.x86_64-unknown-linux-musl]
-linker = "clang"
-rustflags = ["-C", "force-frame-pointers=yes", "-C", "link-arg=-fuse-ld=mold"]
+rustflags="-C force-frame-pointers=yes"
 
 [target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "force-frame-pointers=yes", "-C", "link-arg=-fuse-ld=mold"]
-
-[target.aarch64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags="-C force-frame-pointers=yes"
 
 # https://github.com/rust-lang/rust/issues/141626
 # (can be removed once link.exe is fixed)
