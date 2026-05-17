@@ -151,10 +151,6 @@ jobs:
         # Installing new packages can take time
         timeout-minutes: 15
       - uses: ./.github/actions/setup-mise
-        # setup-mise fails on ubuntu-22.04-arm with mise exit 1 (cause not
-        # currently visible without GitHub Actions log access). Skip it there
-        # until we can surface the underlying error.
-        if: matrix.runs-on != 'ubuntu-22.04-arm'
         with:
           install_args: --cd rust
         env:
