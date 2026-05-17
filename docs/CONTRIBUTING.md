@@ -258,10 +258,10 @@ E.g.
 
 #### Unit Tests
 
-Unit tests can be run with `mix test` from the project root.
+Unit tests can be run with `mix test` from the `elixir/` directory.
 
 To view line coverage information, you may run `mix coveralls.html` which will
-generate an HTML coverage report in `cover/`.
+generate an HTML coverage report in `elixir/cover/`.
 
 #### End-to-end Tests
 
