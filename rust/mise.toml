@@ -15,7 +15,7 @@ NIGHTLY_VERSION = "nightly-2025-09-30"
 "github:aya-rs/bpf-linker" = { version = "0.10.3", os = ["linux"] }
 "cargo:cargo-deb" = { version = "3.7.0", os = ["linux"] }
 "github:taiki-e/cargo-llvm-cov" = "0.6.21"
-"http:mold" = { version = "2.41.0", url = "https://github.com/rui314/mold/releases/download/v{{version}}/mold-{{version}}-{{arch}}-linux.tar.gz", bin_path = "mold-{{version}}-{{arch}}-linux/bin", os = ["linux"] }
+"http:mold" = { version = "2.41.0", url = "https://github.com/rui314/mold/releases/download/v{{version}}/mold-{{version}}-x86_64-linux.tar.gz", bin_path = "mold-{{version}}-x86_64-linux/bin", os = ["linux"] }
 
 # =============================================================================
 # Individual checks (matching CI)
